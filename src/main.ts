@@ -610,6 +610,35 @@ window.addEventListener("focus", () => {
 });
 window.addEventListener("beforeunload", () => pool.stopAll());
 
+// Files dropped on the window: folders open as projects, images attach to
+// the active chat. Tauri handles native drops itself, so HTML5 drop events
+// never see these files.
+const dropHint = h("div", { id: "drop-hint", class: "hidden" }, h("div", null, "폴더를 놓으면 프로젝트로 열고, 이미지를 놓으면 현재 대화에 첨부합니다"));
+document.body.appendChild(dropHint);
+void appWindow.onDragDropEvent(async (event) => {
+	const payload = event.payload;
+	if (payload.type === "enter" || payload.type === "over") {
+		dropHint.classList.remove("hidden");
+		return;
+	}
+	dropHint.classList.add("hidden");
+	if (payload.type !== "drop") return;
+	for (const path of payload.paths) {
+		if (await invoke<boolean>("dir_exists", { path }).catch(() => false)) {
+			await openChat(path);
+			continue;
+		}
+		const view = activeTab?.view;
+		if (!(view instanceof ChatView)) continue;
+		try {
+			const image = await invoke<{ mimeType: string; data: string }>("read_image", { path });
+			view.attachImage(image.mimeType, image.data);
+		} catch (error) {
+			await ask(`첨부할 수 없습니다: ${String(error)}`, { title: "첨부", kind: "warning", okLabel: "확인", cancelLabel: "닫기" });
+		}
+	}
+});
+
 // Dev builds expose the shell for driving the UI over the WebView2 debug port.
 if (import.meta.env.DEV) {
 	Object.assign(window, { __cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal } });

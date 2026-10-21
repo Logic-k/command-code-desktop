@@ -143,6 +143,43 @@ pub fn read_transcript(session_id: String, profile_dir: Option<String>) -> Optio
     None
 }
 
+#[derive(Serialize)]
+pub struct ImageFile {
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    data: String,
+}
+
+/// An image dropped on the window, base64-encoded for an ACP image block.
+/// Only common image types under 10 MB; anything else is refused.
+#[tauri::command]
+pub fn read_image(path: String) -> Result<ImageFile, String> {
+    use base64::Engine as _;
+    const MAX_BYTES: u64 = 10 * 1024 * 1024;
+    let path = Path::new(&path);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let mime_type = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return Err(format!("not an image: {}", path.display())),
+    };
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size > MAX_BYTES {
+        return Err(format!("image too large ({} MB)", size / 1024 / 1024));
+    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    Ok(ImageFile {
+        mime_type: mime_type.to_string(),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
 /// Whether a path is an existing directory; lets the frontend prune stale
 /// entries from its recent-projects list.
 #[tauri::command]

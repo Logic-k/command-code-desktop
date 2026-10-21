@@ -19,6 +19,7 @@ pub fn run() {
             launch::start_dir,
             launch::dir_exists,
             launch::read_transcript,
+            launch::read_image,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

@@ -48,6 +48,8 @@ export class AcpConnection {
 	launch: Launch | null = null;
 	info: InitializeResult | null = null;
 	alive = false;
+	/** Exited or stopped; never usable again (the pool replaces it). */
+	dead = false;
 	readonly log: string[] = [];
 
 	private nextId = 1;
@@ -64,8 +66,11 @@ export class AcpConnection {
 
 	/** Spawn the agent and run `initialize`; safe to call more than once. */
 	start(): Promise<void> {
-		this.ready ??= this.boot().catch((error) => {
-			this.ready = null;
+		if (this.dead) return Promise.reject(new AcpError(-32000, "연결이 이미 닫혔습니다."));
+		// A failed start leaves no half-started process behind: the pool sees
+		// `dead` and the next attempt gets a fresh connection.
+		this.ready ??= this.boot().catch(async (error) => {
+			await this.stop();
 			throw error;
 		});
 		return this.ready;
@@ -151,6 +156,8 @@ export class AcpConnection {
 	}
 
 	async stop(): Promise<void> {
+		if (this.dead) return;
+		this.dead = true;
 		for (const { reject } of this.pending.values()) reject(new AcpError(-32000, "연결이 닫혔습니다."));
 		this.pending.clear();
 		this.alive = false;
@@ -228,7 +235,7 @@ export class AcpConnection {
 
 	private handleExit(code: number | null): void {
 		this.alive = false;
-		this.ready = null;
+		this.dead = true;
 		for (const { reject } of this.pending.values()) {
 			reject(new AcpError(-32000, `에이전트가 종료되었습니다 (코드 ${code ?? "?"}).`));
 		}

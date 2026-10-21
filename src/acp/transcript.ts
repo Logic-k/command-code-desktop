@@ -122,16 +122,20 @@ function planFrom(input: Record<string, unknown> | undefined): PlanEntry[] | nul
 }
 
 /** The active branch: walk parent links back from the last message. Sessions
- * are trees (/rewind, /tree), and only one path is the current conversation. */
+ * are trees (/rewind, /tree), and only one path is the current conversation.
+ * Links run through non-message entries too (a `/model` switch writes a
+ * `model_change` entry that the next message points at), so the walk indexes
+ * every entry and keeps only the messages. */
 function activeBranch(entries: Entry[]): Entry[] {
-	const messages = entries.filter((e) => e.type === "message" && e.message);
+	const isMessage = (e: Entry) => e.type === "message" && Boolean(e.message);
+	const messages = entries.filter(isMessage);
 	if (!messages.length || messages.every((m) => m.parentId === undefined)) return messages;
-	const byId = new Map(messages.filter((m) => m.id).map((m) => [m.id as string, m]));
+	const byId = new Map(entries.filter((e) => e.id).map((e) => [e.id as string, e]));
 	const path: Entry[] = [];
 	const seen = new Set<string>();
 	let node: Entry | undefined = messages[messages.length - 1];
 	while (node && !(node.id && seen.has(node.id))) {
-		path.push(node);
+		if (isMessage(node)) path.push(node);
 		if (node.id) seen.add(node.id);
 		node = node.parentId ? byId.get(node.parentId) : undefined;
 	}

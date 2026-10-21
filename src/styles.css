@@ -1673,3 +1673,23 @@ dialog::backdrop {
 	gap: 8px;
 	margin-top: 6px;
 }
+
+/* ------------------------------------------------------------- drop hint */
+
+#drop-hint {
+	position: fixed;
+	inset: 0;
+	z-index: 50;
+	display: grid;
+	place-items: center;
+	background: color-mix(in srgb, var(--bg) 70%, transparent);
+	pointer-events: none;
+}
+#drop-hint > div {
+	border: 2px dashed var(--accent);
+	border-radius: 16px;
+	padding: 28px 36px;
+	background: var(--bg-elev);
+	color: var(--fg);
+	box-shadow: var(--shadow);
+}

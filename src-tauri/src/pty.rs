@@ -158,7 +158,7 @@ pub fn pty_spawn(
 }
 
 #[tauri::command]
-pub fn pty_write(manager: State<'_, PtyManager>, id: String, data: String) -> Result<(), String> {
+pub async fn pty_write(manager: State<'_, PtyManager>, id: String, data: String) -> Result<(), String> {
     let bytes = B64
         .decode(data.as_bytes())
         .map_err(|e| format!("bad payload: {e}"))?;
@@ -184,7 +184,7 @@ pub fn pty_resize(
 }
 
 #[tauri::command]
-pub fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String> {
+pub async fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String> {
     if let Ok(mut map) = manager.0.lock() {
         if let Some(mut session) = map.remove(&id) {
             let _ = session.child.kill();

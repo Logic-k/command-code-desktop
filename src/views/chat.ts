@@ -183,9 +183,9 @@ export class ChatView {
 		this.title = options.title ?? "새 대화";
 		this.connection = pool.acquire(this.cwd);
 
-		this.modeSelect = h("select", { class: "select", title: "권한 모드 (Shift+Tab)" });
-		this.modelSelect = h("select", { class: "select select-model", title: "모델" });
-		this.effortSelect = h("select", { class: "select", title: "추론 강도" });
+		this.modeSelect = h("select", { class: "select hidden", title: "권한 모드 (Shift+Tab)" });
+		this.modelSelect = h("select", { class: "select select-model hidden", title: "모델" });
+		this.effortSelect = h("select", { class: "select hidden", title: "추론 강도" });
 		this.usageMeter = h("div", { class: "usage", title: "컨텍스트 사용량" });
 		this.modeSelect.addEventListener("change", () => void this.changeMode(this.modeSelect.value));
 		this.modelSelect.addEventListener("change", () => void this.changeConfig("model", this.modelSelect.value));
@@ -268,8 +268,6 @@ export class ChatView {
 			this.planBox,
 			composer,
 		);
-		this.root.addEventListener("dragover", (event) => event.preventDefault());
-		this.root.addEventListener("drop", (event) => this.onDrop(event));
 		this.root.addEventListener("keydown", (event) => this.onRootKey(event));
 
 		this.renderUsage(0, 0);
@@ -283,8 +281,11 @@ export class ChatView {
 	// ----------------------------------------------------------- lifecycle
 
 	private async open(): Promise<void> {
-		this.setStatus("에이전트 시작 중…", true);
-		// A cold `cmd acp` start takes 10-20 s on Windows; say so before it looks hung.
+		// History first: the transcript file is local and instant, while a cold
+		// `cmd acp` start takes 10-20 s.
+		const rendered = this.sessionId && !this.hasContent ? await this.renderTranscript(this.sessionId) : this.hasContent;
+		if (this.disposed) return;
+		this.setStatus(rendered ? "세션에 연결하는 중… (입력은 미리 해 두셔도 됩니다)" : "에이전트 시작 중…", true);
 		const slow = window.setTimeout(() => {
 			if (!this.ready && !this.disposed && this.statusLine.textContent?.endsWith("중…")) {
 				this.setStatus(`${this.statusLine.textContent} 처음 시작은 10~20초 걸릴 수 있습니다.`, true);
@@ -293,11 +294,10 @@ export class ChatView {
 		try {
 			await this.connection.start();
 			if (this.disposed) return;
+			this.detachExit?.();
 			this.detachExit = this.connection.onExit((code) => this.onAgentExit(code));
 			let state: SessionState;
 			if (this.sessionId) {
-				const rendered = await this.renderTranscript(this.sessionId);
-				this.setStatus(rendered ? "세션에 다시 연결하는 중… (입력은 미리 해 두셔도 됩니다)" : "지난 대화 불러오는 중…", true);
 				this.suppressReplay = rendered;
 				this.attachSession(this.sessionId);
 				const loaded = await this.connection.request<Omit<SessionState, "sessionId">>("session/load", {
@@ -313,26 +313,41 @@ export class ChatView {
 				this.sessionId = state.sessionId;
 				this.attachSession(state.sessionId);
 			}
+			// Closed while the session was being set up: dispose() could not
+			// close a session it did not know about yet.
+			if (this.disposed) return this.abandon();
 			this.applyState(state);
 			const wanted = this.host.settings().defaultMode;
 			if (!this.options.sessionId && wanted !== "default" && this.modes.some((m) => m.id === wanted)) {
 				await this.changeMode(wanted);
+				if (this.disposed) return this.abandon();
 			}
-			window.clearTimeout(slow);
 			this.ready = true;
 			this.setStatus("");
 			this.hideBanner();
 			this.scrollToBottom(true);
+			// Queued exactly once; a reconnect must not run it again.
 			if (this.options.initialPrompt) this.queue.unshift(this.options.initialPrompt);
+			this.options.initialPrompt = undefined;
 			const next = this.queue.shift();
 			this.renderQueue();
 			if (next !== undefined) void this.send(next);
 		} catch (error) {
-			window.clearTimeout(slow);
 			this.suppressReplay = false;
+			if (this.disposed) return;
 			this.setStatus("");
 			this.showError(error, () => void this.reconnect());
+		} finally {
+			window.clearTimeout(slow);
 		}
+	}
+
+	private abandon(): void {
+		if (this.sessionId && this.connection.alive) {
+			void this.connection.request("session/close", { sessionId: this.sessionId }).catch(() => undefined);
+		}
+		this.detach?.();
+		this.detach = null;
 	}
 
 	/** Paint history from the transcript file; true when anything was shown. */
@@ -366,6 +381,7 @@ export class ChatView {
 			this.log.replaceChildren();
 			this.tools.clear();
 			this.message = this.thought = this.userBubble = null;
+			this.hasContent = false;
 			this.options.sessionId = this.sessionId;
 		} else {
 			this.sessionId = null;
@@ -396,7 +412,6 @@ export class ChatView {
 		this.detachExit?.();
 		if (this.turnTimer !== null) clearInterval(this.turnTimer);
 		pool.release(this.connection);
-		for (const attachment of this.attachments) URL.revokeObjectURL(attachment.url);
 	}
 
 	// -------------------------------------------------------- session state
@@ -499,7 +514,7 @@ export class ChatView {
 				break;
 			case "agent_message_chunk":
 				this.userBubble = null;
-				this.thought = null;
+				this.endThought();
 				if (update.content.type === "text") this.appendText("message", update.content.text);
 				break;
 			case "agent_thought_chunk":
@@ -633,6 +648,15 @@ export class ChatView {
 		}
 	}
 
+	/** Text after a thought starts a new block; the thought keeps its last chunk. */
+	private endThought(): void {
+		if (this.thought?.dirty) {
+			this.thought.body.innerHTML = renderMarkdown(this.thought.text);
+			this.thought.dirty = false;
+		}
+		this.thought = null;
+	}
+
 	private closeAgentSegments(): void {
 		this.flushSegments();
 		this.message = null;
@@ -691,7 +715,7 @@ export class ChatView {
 			{ class: "tool-head", type: "button" },
 			h("span", { class: "tool-chevron" }, svg(icons.chevron)),
 			svg(icons[KIND_ICON[data.kind ?? ""] ?? "tool"], "icon tool-icon"),
-			h("span", { class: "tool-title", title: data.title ?? "" }, relativeTitle(data.title ?? "도구 실행", this.cwd)),
+			h("span", { class: "tool-title", title: data.title ?? "" }, displayTitle(data, this.cwd)),
 			diffs.length
 				? h(
 						"span",
@@ -830,7 +854,7 @@ export class ChatView {
 					{ class: "perm-head" },
 					svg(icons.shield),
 					h("span", null, "권한 요청"),
-					h("span", { class: "perm-title" }, tool.title ?? "도구 실행"),
+					h("span", { class: "perm-title", title: tool.title ?? "" }, displayTitle(tool, this.cwd)),
 				),
 				preview.childNodes.length ? preview : null,
 				actions,
@@ -941,6 +965,7 @@ export class ChatView {
 				return;
 			}
 			if (event.key === "Escape") {
+				event.stopPropagation();
 				this.slashMenu.classList.add("hidden");
 				return;
 			}
@@ -992,24 +1017,24 @@ export class ChatView {
 		for (const file of files) void this.addImage(file);
 	}
 
-	private onDrop(event: DragEvent): void {
-		event.preventDefault();
-		const files = [...(event.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith("image/"));
-		for (const file of files) void this.addImage(file);
-	}
-
 	private async addImage(file: File): Promise<void> {
-		if (!this.connection.acceptsImages) {
-			this.flash("이 에이전트는 이미지 입력을 지원하지 않습니다.");
-			return;
-		}
 		const buffer = new Uint8Array(await file.arrayBuffer());
 		let binary = "";
 		for (let i = 0; i < buffer.length; i += 0x8000) {
 			binary += String.fromCharCode(...buffer.subarray(i, i + 0x8000));
 		}
-		this.attachments.push({ mimeType: file.type, data: btoa(binary), url: URL.createObjectURL(file) });
+		this.attachImage(file.type, btoa(binary));
+	}
+
+	/** Attach a base64 image to the next message (paste, or a file dropped on the window). */
+	attachImage(mimeType: string, data: string): void {
+		if (this.connection.info && !this.connection.acceptsImages) {
+			this.flash("이 에이전트는 이미지 입력을 지원하지 않습니다.");
+			return;
+		}
+		this.attachments.push({ mimeType, data, url: `data:${mimeType};base64,${data}` });
 		this.renderAttachments();
+		this.input.focus();
 	}
 
 	private renderAttachments(): void {
@@ -1026,7 +1051,6 @@ export class ChatView {
 							class: "attachment-x",
 							title: "빼기",
 							onclick: () => {
-								URL.revokeObjectURL(attachment.url);
 								this.attachments.splice(index, 1);
 								this.renderAttachments();
 							},
@@ -1081,7 +1105,6 @@ export class ChatView {
 
 		this.closeSegments();
 		for (const block of prompt) this.appendUser(block);
-		for (const image of images) URL.revokeObjectURL(image.url);
 		this.userBubble = null;
 		this.scrollToBottom(true);
 		this.hideBanner();
@@ -1100,7 +1123,8 @@ export class ChatView {
 			this.host.attention("done", lastLine(this.lastAgentText()) || "응답 완료");
 		} catch (error) {
 			this.closeSegments();
-			this.showError(error);
+			// A crash already put up the banner with "다시 연결"; keep it.
+			if (this.connection.alive) this.showError(error);
 			this.host.attention("error", describeError(error));
 		} finally {
 			this.finishTurnUi();
@@ -1248,6 +1272,16 @@ function shortPath(path: string, cwd: string): string {
 	const base = cwd.replace(/[\\/]+$/, "");
 	if (norm(path).startsWith(`${norm(base)}\\`)) return path.slice(base.length + 1);
 	return path;
+}
+
+/** The CLI truncates long titles ("Write: C:\Users\…\46..."); when the tool
+ * names a file, rebuild the title from its full path, shortened to the project. */
+function displayTitle(tool: ToolCall, cwd: string): string {
+	const title = tool.title ?? "도구 실행";
+	const path = tool.locations?.[0]?.path;
+	const label = title.match(/^([^:]{1,24}):\s/)?.[1];
+	if (path && label) return `${label}: ${shortPath(path, cwd)}`;
+	return relativeTitle(title, cwd);
 }
 
 /** "Write: C:\proj\src\a.ts" → "Write: src\a.ts" inside the project. */

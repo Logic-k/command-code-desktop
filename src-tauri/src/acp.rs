@@ -26,41 +26,48 @@ pub const EXIT_EVENT: &str = "acp://exit";
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// One agent process. Each part has its own lock so a slow write to one
+/// agent never blocks the registry or any other agent.
 struct Agent {
-    stdin: ChildStdin,
-    child: Child,
+    stdin: Mutex<ChildStdin>,
+    child: Mutex<Child>,
 }
 
 impl Agent {
     /// Kill the agent and everything it started (shell commands, dev servers):
     /// killing only `node` would orphan its tool processes on Windows.
-    fn kill_tree(&mut self) {
+    fn kill_tree(&self) {
+        let Ok(mut child) = self.child.lock() else {
+            return;
+        };
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             let _ = Command::new("taskkill")
-                .args(["/PID", &self.child.id().to_string(), "/T", "/F"])
+                .args(["/PID", &child.id().to_string(), "/T", "/F"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .creation_flags(CREATE_NO_WINDOW)
                 .status();
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
 /// Live agent processes, keyed by the frontend's connection id.
 #[derive(Clone, Default)]
-pub struct AcpManager(Arc<Mutex<HashMap<String, Agent>>>);
+pub struct AcpManager(Arc<Mutex<HashMap<String, Arc<Agent>>>>);
 
 impl AcpManager {
     /// Kill every agent; called when the app exits so no node child outlives it.
     pub fn kill_all(&self) {
-        if let Ok(mut map) = self.0.lock() {
-            for (_, mut agent) in map.drain() {
-                agent.kill_tree();
-            }
+        let agents: Vec<Arc<Agent>> = match self.0.lock() {
+            Ok(mut map) => map.drain().map(|(_, agent)| agent).collect(),
+            Err(_) => return,
+        };
+        for agent in agents {
+            agent.kill_tree();
         }
     }
 }
@@ -114,7 +121,13 @@ pub fn acp_spawn(
             let _ = child.kill();
             return Err(format!("agent {id} already exists"));
         }
-        map.insert(id.clone(), Agent { stdin, child });
+        map.insert(
+            id.clone(),
+            Arc::new(Agent {
+                stdin: Mutex::new(stdin),
+                child: Mutex::new(child),
+            }),
+        );
     }
 
     std::thread::spawn(move || {
@@ -150,12 +163,9 @@ pub fn acp_spawn(
                 }
             }
         }
-        let code = manager_handle
-            .0
-            .lock()
-            .ok()
-            .and_then(|mut map| map.remove(&id))
-            .and_then(|mut agent| agent.child.wait().ok())
+        let agent = manager_handle.0.lock().ok().and_then(|mut map| map.remove(&id));
+        let code = agent
+            .and_then(|agent| agent.child.lock().ok().and_then(|mut child| child.wait().ok()))
             .and_then(|status| status.code());
         let _ = app.emit(EXIT_EVENT, ExitPayload { id, code });
     });
@@ -163,25 +173,32 @@ pub fn acp_spawn(
     Ok(launch)
 }
 
-/// Write one JSON-RPC message; the newline framing is added here.
+/// Write one JSON-RPC message; the newline framing is added here. Async so the
+/// write (which blocks when the agent stops reading) stays off the UI thread.
 #[tauri::command]
-pub fn acp_send(manager: State<'_, AcpManager>, id: String, line: String) -> Result<(), String> {
-    let mut map = manager.0.lock().map_err(|e| e.to_string())?;
-    let agent = map.get_mut(&id).ok_or_else(|| format!("no agent {id}"))?;
-    agent
-        .stdin
+pub async fn acp_send(manager: State<'_, AcpManager>, id: String, line: String) -> Result<(), String> {
+    let agent = manager
+        .0
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("no agent {id}"))?;
+    let mut stdin = agent.stdin.lock().map_err(|e| e.to_string())?;
+    stdin
         .write_all(line.as_bytes())
-        .and_then(|_| agent.stdin.write_all(b"\n"))
-        .and_then(|_| agent.stdin.flush())
+        .and_then(|_| stdin.write_all(b"
+"))
+        .and_then(|_| stdin.flush())
         .map_err(|e| format!("write failed: {e}"))
 }
 
 #[tauri::command]
-pub fn acp_kill(manager: State<'_, AcpManager>, id: String) -> Result<(), String> {
-    if let Ok(mut map) = manager.0.lock() {
-        if let Some(mut agent) = map.remove(&id) {
-            agent.kill_tree();
-        }
+pub async fn acp_kill(manager: State<'_, AcpManager>, id: String) -> Result<(), String> {
+    let agent = manager.0.lock().ok().and_then(|mut map| map.remove(&id));
+    if let Some(agent) = agent {
+        // taskkill and wait() block; keep them off the async runtime's workers.
+        let _ = tauri::async_runtime::spawn_blocking(move || agent.kill_tree()).await;
     }
     Ok(())
 }

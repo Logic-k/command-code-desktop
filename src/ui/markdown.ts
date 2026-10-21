@@ -26,6 +26,16 @@ export function escapeHtml(text: string): string {
 	return text.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
 }
 
+// Model output must not fetch anything by itself: a remote <img> would leak
+// whatever the model put in its URL the moment it renders. Only inline data
+// images survive; links still need a click and open in the system browser.
+DOMPurify.addHook("uponSanitizeElement", (node, data) => {
+	if (data.tagName === "img") {
+		const src = (node as Element).getAttribute?.("src") ?? "";
+		if (!src.startsWith("data:image/")) node.parentNode?.removeChild(node);
+	}
+});
+
 export function renderMarkdown(source: string): string {
 	const html = marked.parse(source, { async: false }) as string;
 	return DOMPurify.sanitize(html, {
