@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,35 +8,36 @@
   </head>
 
   <body>
-    <div id="shell">
-      <header id="toolbar">
-        <button id="pick" class="btn">Choose folder…</button>
-        <span id="cwd" class="cwd" title="">select a folder to start</span>
-        <span class="spacer"></span>
-        <label id="yolo-wrap" class="toggle" title="Bypasses every permission prompt. Dangerous.">
-          <input type="checkbox" id="yolo" />
-          <span>--yolo</span>
-        </label>
-        <span id="profile" class="pill" title="Profile switching runs the CLI with a different USERPROFILE">profile: default</span>
-        <button id="restart" class="btn" disabled>Restart</button>
-        <button id="kill" class="btn danger" disabled>Stop</button>
-      </header>
-
-      <main id="screen">
-        <div id="terminal"></div>
-        <div id="empty">
-          <h1>Command Code Desktop</h1>
-          <p>Press <strong>Choose folder…</strong> and pick a project. <code>cmdc</code> starts in that folder immediately.</p>
-          <p class="muted">No terminal app, no <code>cd</code>.</p>
+    <div id="app">
+      <aside id="sidebar">
+        <div class="side-top">
+          <span class="brand"><span class="brand-mark">⌘</span> Command Code</span>
+          <button id="collapse" class="icon-btn" title="사이드바 접기 (Ctrl+B)"></button>
         </div>
-      </main>
+        <div class="side-actions">
+          <button id="new-chat" class="btn primary wide"></button>
+          <button id="open-folder" class="btn wide"></button>
+        </div>
+        <div class="side-label">프로젝트</div>
+        <nav id="projects"></nav>
+        <div class="side-foot">
+          <button id="open-settings" class="btn ghost wide"></button>
+          <div id="cli-version" class="muted small"></div>
+        </div>
+      </aside>
 
-      <footer id="status">
-        <span id="launch">launch: resolving…</span>
-        <span class="spacer"></span>
-        <span id="session">session: —</span>
-        <span id="dims" class="muted"></span>
-      </footer>
+      <main id="main">
+        <div id="tabbar">
+          <button id="expand" class="icon-btn hidden" title="사이드바 펼치기 (Ctrl+B)"></button>
+          <div id="tabs" role="tablist"></div>
+          <button id="new-tab" class="icon-btn" title="새 채팅 (Ctrl+N)"></button>
+          <button id="new-term" class="icon-btn" title="터미널 탭 — TUI 그대로 (Ctrl+T)"></button>
+        </div>
+        <div id="views"></div>
+        <div id="home"></div>
+      </main>
     </div>
+
+    <dialog id="settings"></dialog>
   </body>
 </html>

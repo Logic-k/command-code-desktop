@@ -6,7 +6,19 @@
   "permissions": [
     "core:default",
     "core:event:default",
+    "core:window:allow-set-title",
     "dialog:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "opener:default",
+    "opener:allow-reveal-item-in-dir",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [{ "path": "**" }]
+    },
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://*" }, { "url": "http://*" }]
+    },
+    "notification:default"
   ]
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "cmdc-gui",
-  "version": "0.1.0",
+  "productName": "Command Code Desktop",
+  "version": "0.2.0",
   "identifier": "ai.commandcode.cmdcgui",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -14,14 +14,16 @@
     "windows": [
       {
         "title": "Command Code Desktop",
-        "width": 1100,
-        "height": 760,
-        "minWidth": 720,
-        "minHeight": 480
+        "width": 1280,
+        "height": 840,
+        "minWidth": 760,
+        "minHeight": 520,
+        "label": "main",
+        "backgroundColor": "#0f1115"
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' data: blob: asset: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost 'self'; font-src 'self' data:"
     }
   },
   "bundle": {

@@ -1,9 +1,10 @@
 [package]
 name = "cmdc-gui"
-version = "0.1.0"
+version = "0.2.0"
 description = "Desktop GUI shell for the Command Code CLI"
 authors = ["you"]
 edition = "2024"
+default-run = "cmdc-gui"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -24,6 +25,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = "0.9"
 base64 = "0.22"
+tauri-plugin-opener = "2"
+tauri-plugin-notification = "2"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

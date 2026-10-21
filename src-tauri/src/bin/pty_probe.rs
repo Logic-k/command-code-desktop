@@ -29,7 +29,7 @@ fn main() {
 		.unwrap_or(4000);
 	let passthrough = argv;
 
-	let launch = cmdc_gui_lib::pty::resolve_launch();
+	let launch = cmdc_gui_lib::launch::resolve_launch();
 	println!("launch.via      = {}", launch.via);
 	println!("launch.program  = {}", launch.program);
 	println!("launch.args     = {:?}", launch.prefix_args);

@@ -1,30 +1,24 @@
-//! PTY plumbing: run the Command Code CLI under a real console (ConPTY on
+//! Terminal tabs: run the Command Code TUI under a real console (ConPTY on
 //! Windows) and stream its bytes to the frontend.
 //!
-//! Design notes
-//! ------------
-//! * `cmdc` on Windows is an npm shim (`cmdc.cmd`) that runs
-//!   `node <npm-bin>/node_modules/command-code/dist/index.mjs`. We resolve that
-//!   layout ourselves and spawn `node` directly, so the TUI runs under a real
-//!   ConPTY with no `cmd.exe` layer in between. If resolution fails we fall back
-//!   to the shim through `%COMSPEC%`.
-//! * The child environment is seeded from this process and then overridden, so
-//!   the profile knob (`USERPROFILE`) isolates `~/.commandcode` per account while
-//!   PATH and the rest still work.
-//! * Output is base64-encoded and pushed over a Tauri `Channel`; a TUI redraw is
-//!   small enough that this stays well inside budget.
+//! The chat tabs talk ACP instead (see `acp.rs`); this path stays for what only
+//! the TUI does, such as `cmd login` and the full-screen `/config`.
+//!
+//! Output is base64-encoded and pushed over a Tauri `Channel`; a TUI redraw is
+//! small enough that this stays well inside budget.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use serde::Serialize;
+use base64::engine::general_purpose::STANDARD as B64;
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
+
+use crate::launch::{Launch, child_env, resolve_launch};
 
 /// Emitted with the session id when a child exits and its session is dropped.
 pub const EXIT_EVENT: &str = "pty://exit";
@@ -54,79 +48,15 @@ impl Session {
 #[derive(Clone, Default)]
 pub struct PtyManager(Arc<Mutex<HashMap<String, Session>>>);
 
-/// How we decided to launch the CLI. Surfaced to the frontend for diagnostics.
-#[derive(Clone, Serialize)]
-pub struct Launch {
-    /// Executable to spawn (`node.exe`, or `%COMSPEC%` on the shim fallback).
-    pub program: String,
-    /// Arguments that must precede the user's arguments.
-    pub prefix_args: Vec<String>,
-    /// `node` when we resolved the package entry, `shim` when we fell back.
-    pub via: String,
-    /// The resolved `dist/index.mjs`, when known.
-    pub entry: Option<String>,
-}
-
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
-}
-
-/// Resolve the CLI the same way the npm shim does, without needing the shim.
-pub fn resolve_launch() -> Launch {
-    let shim = find_on_path("cmdc.cmd").or_else(|| find_on_path("cmdc"));
-    if let Some(shim) = shim {
-        if let Some(dir) = shim.parent() {
-            let entry = dir
-                .join("node_modules")
-                .join("command-code")
-                .join("dist")
-                .join("index.mjs");
-            if entry.is_file() {
-                let local_node = dir.join("node.exe");
-                let program = if local_node.is_file() {
-                    local_node.to_string_lossy().into_owned()
-                } else {
-                    "node".to_string()
-                };
-                return Launch {
-                    program,
-                    prefix_args: vec![entry.to_string_lossy().into_owned()],
-                    via: "node".to_string(),
-                    entry: Some(entry.to_string_lossy().into_owned()),
-                };
+impl PtyManager {
+    /// Kill every child; called when the app exits so no TUI outlives it.
+    pub fn kill_all(&self) {
+        if let Ok(mut map) = self.0.lock() {
+            for (_, mut session) in map.drain() {
+                let _ = session.child.kill();
             }
         }
     }
-
-    Launch {
-        program: std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
-        prefix_args: vec!["/c".to_string(), "cmdc".to_string()],
-        via: "shim".to_string(),
-        entry: None,
-    }
-}
-
-#[tauri::command]
-pub fn cmdc_launch() -> Launch {
-    resolve_launch()
-}
-
-/// A folder to open on launch: `CMDC_GUI_START_DIR`, else the first positional
-/// argument that names an existing directory. This is what makes the app usable
-/// from a shortcut or a script (`cmdc-gui.exe D:\project`).
-#[tauri::command]
-pub fn start_dir() -> Option<String> {
-    if let Ok(value) = std::env::var("CMDC_GUI_START_DIR") {
-        if !value.trim().is_empty() && Path::new(&value).is_dir() {
-            return Some(value);
-        }
-    }
-    std::env::args()
-        .skip(1)
-        .find(|arg| !arg.starts_with('-') && Path::new(arg).is_dir())
 }
 
 #[tauri::command]
@@ -158,29 +88,18 @@ pub fn pty_spawn(
         .map_err(|e| format!("openpty failed: {e}"))?;
 
     let mut cmd = CommandBuilder::new(&launch.program);
-    for arg in &launch.prefix_args {
-        cmd.arg(arg);
-    }
-    for arg in &args {
-        cmd.arg(arg);
-    }
+    cmd.args(&launch.prefix_args);
+    cmd.args(&args);
     cmd.cwd(Path::new(&cwd));
 
-    // Seed the whole parent environment first, then override. This is
-    // deliberately belt-and-braces: CommandBuilder's inheritance behaviour is
-    // not uniform across backends, and the child needs PATH at minimum.
-    for (key, value) in std::env::vars() {
+    // Seed the whole parent environment explicitly: CommandBuilder's
+    // inheritance behaviour is not uniform across backends, and the child
+    // needs PATH at minimum.
+    for (key, value) in child_env(profile_dir.as_deref()) {
         cmd.env(key, value);
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    cmd.env("CMDC_GUI", "1");
-    if let Some(dir) = profile_dir.as_ref().map(String::as_str).filter(|d| !d.is_empty()) {
-        // USERPROFILE is the knob that moves ~/.commandcode; HOME follows it so
-        // tools inside the session agree on where home is.
-        cmd.env("USERPROFILE", dir);
-        cmd.env("HOME", dir);
-    }
 
     let child = pair
         .slave
@@ -272,13 +191,4 @@ pub fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String
         }
     }
     Ok(())
-}
-
-#[tauri::command]
-pub fn pty_list(manager: State<'_, PtyManager>) -> Vec<String> {
-    manager
-        .0
-        .lock()
-        .map(|map| map.keys().cloned().collect())
-        .unwrap_or_default()
 }

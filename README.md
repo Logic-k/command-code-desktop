@@ -1,102 +1,94 @@
-# Command Code Desktop (cmdc-gui)
+# Command Code Desktop
 
-A Tauri shell that turns the Command Code CLI into a desktop app: pick a folder,
-and `cmdc` starts in it. No terminal app, no `cd`, no typing the command.
+Command Code CLI를 GUI 앱처럼 쓰는 Windows 데스크톱 앱입니다 (Tauri 2).
+폴더를 고르면 바로 대화가 시작되고, 터미널도 `cd`도 필요 없습니다.
 
 ```
-Choose folder…  C:\work\my-project   [ ] --yolo   profile: default   Restart  Stop
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  (the real Command Code TUI, rendered by xterm.js over a ConPTY)             │
-└──────────────────────────────────────────────────────────────────────────────┘
-launch: node entry · node            session: tab-…            144×40
+┌ 사이드바 ─────┬ [채팅: 버그 수정] [채팅: 새 대화] [터미널] [+] ─────────────────┐
+│ + 새 채팅     │ cmdc-gui        [표준 ▾] [Claude Sonnet 5.5 ▾] [high ▾] ▮▮▯ 21% │
+│ 프로젝트       │                                                        │
+│ ▾ cmdc-gui   │                     README에 설치 방법 추가해 줘  (사용자)     │
+│   대화 A  2시간│  ▸ Read README.md                                  [완료]   │
+│   대화 B  1일  │  ▾ Edit README.md                        +5 −0     [완료]   │
+│ ▸ anki       │     (diff)                                                │
+│              │  ⛨ 권한 요청  $ pnpm test   [1 한 번 허용] [2 항상] [3 거부]   │
+│ ⚙ 설정        │  [ 무엇을 할까요? ( / 명령 · 이미지 붙여넣기 )          → ]      │
+└──────────────┴────────────────────────────────────────────────────────┘
 ```
 
-## Why a PTY, not a subprocess
+## 기능
 
-Command Code is a TUI. It needs a real console: it issues `ESC[6n` (cursor
-position), enables bracketed paste and synchronized output, and paints inline
-with truecolor. A plain pipe gives it no terminal, so it blocks on the very first
-query and never draws. `portable-pty` creates a real **ConPTY** on Windows, and
-xterm.js answers those queries exactly like a terminal does.
+- **채팅 탭 (ACP)**: `cmd acp`(Agent Client Protocol)로 CLI와 대화합니다.
+  - 마크다운·코드 하이라이트 답변, 접을 수 있는 "생각" 블록
+  - 도구 실행 카드 (읽기/수정/검색/명령 실행), 파일 수정은 diff로, 경로 클릭 시 파일 열기
+  - 권한 요청은 버튼 또는 숫자 키 `1`~`4`로 응답
+  - 할 일(todo) 진행률 패널, 컨텍스트 사용량 게이지
+  - 모드(표준/편집 자동 허용/계획/묻지 않기/권한 무시)·모델·추론 강도 드롭다운, `Shift+Tab`으로 모드 순환
+  - `/` 명령 자동완성, 이미지 붙여넣기·드래그 앤 드롭
+  - 작업 중 입력하면 대기열에 쌓였다가 차례로 전송, `Esc`로 중지
+- **지난 대화 이어 하기**: 사이드바에서 프로젝트를 펼치면 그 폴더의 세션 목록이 나옵니다. 클릭하면 기록 파일(`~/.commandcode/projects/…/<id>.jsonl`)을 바로 그려 주고, 뒤에서 세션에 다시 연결합니다.
+- **터미널 탭 (TUI)**: 진짜 Command Code TUI를 ConPTY로 띄웁니다. 로그인, `/usage`, `/config`처럼 GUI에 없는 기능용. `Ctrl+C`(선택 시 복사)·`Ctrl+V`·우클릭 지원.
+- **알림**: 창이 뒤에 있을 때 응답 완료·권한 요청을 Windows 알림으로 알려 주고, 탭에 점을 표시합니다.
+- **설정**: 새 채팅 기본 모드, 보내기 키, 테마(시스템/어둡게/밝게), 계정 프로필 폴더, 터미널 글자 크기.
 
-## Architecture
+### 단축키
 
-| Layer | File | Job |
-| --- | --- | --- |
-| PTY + launch resolution | `src-tauri/src/pty.rs` | spawn `node <npm-bin>/node_modules/command-code/dist/index.mjs` in a ConPTY, stream bytes over a Tauri `Channel`, handle write/resize/kill |
-| Commands | `src-tauri/src/lib.rs` | register `cmdc_launch`, `start_dir`, `pty_spawn`, `pty_write`, `pty_resize`, `pty_kill`, `pty_list` |
-| Terminal UI | `src/main.ts` | xterm.js + fit / webgl / unicode11 / web-links, base64 framing, folder picker, restart/stop, launch diagnostics |
-| PTY diagnostic | `src-tauri/src/bin/pty_probe.rs` | headless proof that the CLI paints over a pty; plays terminal and answers its queries |
+| 키 | 동작 |
+| --- | --- |
+| `Ctrl+N` | 새 채팅 (현재 프로젝트) |
+| `Ctrl+O` | 폴더 열기 |
+| `Ctrl+T` | 터미널 탭 |
+| `Ctrl+W` | 탭 닫기 |
+| `Ctrl+Tab` / `Ctrl+1~9` | 탭 전환 |
+| `Ctrl+B` | 사이드바 접기 |
+| `Ctrl+,` | 설정 |
+| `Esc` | 진행 중인 작업 중지 |
+| `Shift+Tab` | 권한 모드 순환 |
 
-### Launch resolution
+## 실행
 
-`cmdc` on Windows is an npm shim that runs `node …/command-code/dist/index.mjs`.
-`pty.rs` resolves that layout itself and spawns `node` directly, so there is no
-`cmd.exe` layer between the app and the TUI. If resolution fails it falls back to
-`%COMSPEC% /c cmdc`, surfaced as `launch: shim fallback` in the status bar.
-
-## Run
+필요: Node 22+, Rust stable, pnpm, 그리고 설치·로그인된 Command Code CLI (`npm i -g command-code`, `cmd login`).
 
 ```bash
 pnpm install
 pnpm tauri dev
 ```
 
-A debug build loads the dev server (`http://localhost:1420`), so `pnpm tauri dev`
-is the way to run it during development. A release build (`pnpm tauri build`)
-uses the bundled `dist/`.
-
-Open a folder directly (shortcut-friendly):
+배포용 빌드 (설치 파일은 `src-tauri/target/release/bundle/`):
 
 ```bash
-cmdc-gui.exe D:\project
-# or
-CMDC_GUI_START_DIR=D:\project cmdc-gui.exe
+pnpm tauri build
 ```
 
-## Verify
+폴더를 바로 열기:
 
 ```bash
-# 1. Does the CLI paint over a pty at all? (no GUI needed)
-cargo run --manifest-path src-tauri/Cargo.toml --bin pty_probe
-
-# 2. Does the app spawn the CLI as its own child?
-pnpm tauri dev
-# then: Get-CimInstance Win32_Process | Where-Object ParentProcessId -eq <app pid>
-# expect: node.exe …command-code\dist\index.mjs  and  conhost.exe --headless
+"Command Code Desktop.exe" D:\project
 ```
 
-`pty_probe` prints the TUI signals it saw (colour, synchronized output, bracketed
-paste), a plain-text preview, and a hex dump of the first bytes.
+## 구조
 
-## Verified on this machine
+설계와 근거는 [docs/DESIGN.md](docs/DESIGN.md)에 있습니다.
 
-- ConPTY + node spawn: the app owns `node.exe …index.mjs` and a `conhost.exe
-  --headless --width 144 --height 40` as direct children.
-- The CLI paints: 1148 bytes captured, truecolor (`38;2;…`), `?2026h` sync output,
-  `?2004h` bracketed paste, real UI text.
-- The window renders the custom theme (dominant `#101115`, panel `#171a20`, 688
-  distinct colours).
+| 파일 | 역할 |
+| --- | --- |
+| `src-tauri/src/launch.rs` | CLI 위치 확인, 시작 폴더, 세션 기록 파일 읽기 |
+| `src-tauri/src/acp.rs` | `cmd acp` 프로세스 실행, 줄 단위 JSON-RPC 운반, 종료 시 프로세스 트리 정리 |
+| `src-tauri/src/pty.rs` | 터미널 탭: ConPTY로 TUI 실행 |
+| `src/acp/client.ts` | JSON-RPC 클라이언트 (요청/응답, 알림, 권한 요청) |
+| `src/acp/pool.ts` | 폴더당 에이전트 프로세스 하나를 공유 |
+| `src/acp/transcript.ts` | 세션 기록 JSONL → 화면 업데이트 |
+| `src/views/chat.ts` | 채팅 화면 |
+| `src/views/terminal.ts` | 터미널 화면 |
+| `src/main.ts` | 사이드바, 탭, 설정, 단축키, 알림 |
 
-## Known gaps / next steps
+## 알려진 한계
 
-- **Keyboard fidelity is unverified.** The CLI sets `ESC[?9001h` (Win32 input
-  mode), a Windows Terminal extension xterm.js ignores. Shift+Enter / Alt+Enter
-  and some chords may need an explicit keymap. Verify by hand first.
-- **Profile switching is wired but has no UI.** `pty_spawn` accepts
-  `profile_dir`; pointing `USERPROFILE` at a fresh directory gives a clean
-  `~/.commandcode` (verified: `cmdc status` reports "Not authenticated"). A
-  profile switcher is the natural next step — note that a separate `USERPROFILE`
-  also separates each profile's git/global tool config.
-- **`--yolo` is a checkbox, off by default.** It bypasses every permission
-  prompt. Consider per-project opt-in with a visible warning instead.
-- **Project trust prompt** appears on a new folder (the CLI asks). `--trust`
-  exists but is deliberately not passed automatically.
-- Single tab only; no split panes, no session list, no persisted profile store.
+- `cmd acp`가 처음 뜨는 데 10~20초 걸립니다(CLI 자체 시작 시간). 같은 폴더의 두 번째 대화부터는 연결을 재사용해 빠릅니다.
+- ACP는 슬래시 명령 일부(`/compact`와 스킬)만 노출합니다. `/usage`, `/config`, `/rewind` 등은 터미널 탭에서 쓰세요.
+- 할 일 패널은 CLI의 `todos` 모드가 켜져 있어야 나옵니다 (`cmd mods enable todos -g`).
+- 계정 프로필 폴더를 바꾸면 그 폴더가 홈이 되므로 git 전역 설정 등도 분리됩니다.
 
-## Scope and licensing
+## 범위
 
-This is a personal desktop shell around the Command Code CLI you already have
-installed and are subscribed to. It does not bundle, redistribute, or reimplement
-Command Code, and it does not change what your plan allows. Account credentials
-stay in `~/.commandcode` and are never copied.
+이미 설치하고 구독 중인 Command Code CLI를 감싸는 개인용 데스크톱 셸입니다. Command Code를 포함·재배포·재구현하지 않으며, 계정 정보(`~/.commandcode/auth.json`)는 읽거나 복사하지 않습니다.
