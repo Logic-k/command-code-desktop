@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Command Code Desktop</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div id="shell">
+      <header id="toolbar">
+        <button id="pick" class="btn">Choose folder…</button>
+        <span id="cwd" class="cwd" title="">select a folder to start</span>
+        <span class="spacer"></span>
+        <label id="yolo-wrap" class="toggle" title="Bypasses every permission prompt. Dangerous.">
+          <input type="checkbox" id="yolo" />
+          <span>--yolo</span>
+        </label>
+        <span id="profile" class="pill" title="Profile switching runs the CLI with a different USERPROFILE">profile: default</span>
+        <button id="restart" class="btn" disabled>Restart</button>
+        <button id="kill" class="btn danger" disabled>Stop</button>
+      </header>
+
+      <main id="screen">
+        <div id="terminal"></div>
+        <div id="empty">
+          <h1>Command Code Desktop</h1>
+          <p>Press <strong>Choose folder…</strong> and pick a project. <code>cmdc</code> starts in that folder immediately.</p>
+          <p class="muted">No terminal app, no <code>cd</code>.</p>
+        </div>
+      </main>
+
+      <footer id="status">
+        <span id="launch">launch: resolving…</span>
+        <span class="spacer"></span>
+        <span id="session">session: —</span>
+        <span id="dims" class="muted"></span>
+      </footer>
+    </div>
+  </body>
+</html>
