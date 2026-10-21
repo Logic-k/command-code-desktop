@@ -28,6 +28,8 @@ Command Code CLI를 GUI 앱처럼 쓰는 Windows 데스크톱 앱입니다 (Taur
   - 작업 중 입력하면 대기열에 쌓였다가 차례로 전송, `Esc`로 중지
 - **지난 대화 이어 하기**: 사이드바에서 프로젝트를 펼치면 그 폴더의 세션 목록이 나옵니다. 클릭하면 기록 파일(`~/.commandcode/projects/…/<id>.jsonl`)을 바로 그려 주고, 뒤에서 세션에 다시 연결합니다.
 - **터미널 탭 (TUI)**: 진짜 Command Code TUI를 ConPTY로 띄웁니다. 로그인, `/usage`, `/config`처럼 GUI에 없는 기능용. `Ctrl+C`(선택 시 복사)·`Ctrl+V`·우클릭 지원.
+- **끌어다 놓기**: 폴더를 창에 놓으면 프로젝트로 열리고, 이미지를 놓으면 현재 대화에 첨부됩니다.
+- **한 창으로**: 앱이 켜져 있을 때 `cmdc-gui.exe D:\project`를 다시 실행하면 새 창 대신 기존 창에 그 폴더가 열립니다. 창 크기·위치는 기억합니다.
 - **알림**: 창이 뒤에 있을 때 응답 완료·권한 요청을 Windows 알림으로 알려 주고, 탭에 점을 표시합니다.
 - **설정**: 새 채팅 기본 모드, 보내기 키, 테마(시스템/어둡게/밝게), 계정 프로필 폴더, 터미널 글자 크기.
 
@@ -63,7 +65,7 @@ pnpm tauri build
 폴더를 바로 열기:
 
 ```bash
-"Command Code Desktop.exe" D:\project
+cmdc-gui.exe D:\project
 ```
 
 ## 구조
