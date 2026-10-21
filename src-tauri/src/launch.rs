@@ -98,8 +98,12 @@ pub fn start_dir() -> Option<String> {
             return Some(value);
         }
     }
-    std::env::args()
-        .skip(1)
+    dir_from_args(std::env::args().skip(1))
+}
+
+/// The first argument that is an existing directory (flags skipped).
+pub fn dir_from_args(args: impl IntoIterator<Item = String>) -> Option<String> {
+    args.into_iter()
         .find(|arg| !arg.starts_with('-') && Path::new(arg).is_dir())
 }
 

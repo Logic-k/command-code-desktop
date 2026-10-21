@@ -4,11 +4,26 @@ pub mod pty;
 
 use acp::AcpManager;
 use pty::PtyManager;
-use tauri::{Manager, RunEvent};
+use tauri::{Emitter, Manager, RunEvent};
+
+/// Sent to the window when a second launch asks for a folder.
+const OPEN_FOLDER_EVENT: &str = "app://open-folder";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        // Must be first: a second launch (`Command Code Desktop.exe D:\project`,
+        // a shortcut, a script) hands its folder to the running window and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if let Some(dir) = launch::dir_from_args(args.into_iter().skip(1)) {
+                let _ = app.emit(OPEN_FOLDER_EVENT, dir);
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())

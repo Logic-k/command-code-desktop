@@ -2,6 +2,7 @@
 // settings, shortcuts, and system notifications.
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
@@ -675,4 +676,7 @@ void (async () => {
 	// into a chat, which makes the app scriptable from a shortcut.
 	const startDir = await invoke<string | null>("start_dir").catch(() => null);
 	if (startDir) await openChat(startDir);
+
+	// A second launch with a folder (single-instance) lands here.
+	void listen<string>("app://open-folder", (event) => void openChat(event.payload));
 })();
