@@ -87,6 +87,7 @@ pub fn acp_spawn(
     id: String,
     cwd: String,
     profile_dir: Option<String>,
+    account_id: Option<String>,
     on_message: Channel<String>,
     on_log: Channel<String>,
 ) -> Result<Launch, String> {
@@ -100,7 +101,7 @@ pub fn acp_spawn(
         .arg("acp")
         .current_dir(&cwd)
         .env_clear()
-        .envs(child_env(profile_dir.as_deref()))
+        .envs(child_env(profile_dir.as_deref(), account_id.as_deref())?)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

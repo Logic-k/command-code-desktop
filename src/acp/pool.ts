@@ -1,4 +1,4 @@
-// One agent process per project folder (and account profile), shared by that
+// One agent process per project folder and account, shared by that
 // folder's chat tabs and its sidebar session list. `cmd acp` serves exactly
 // one directory, and `session/list` answers for the process's own cwd.
 //
@@ -22,10 +22,8 @@ interface Entry {
 const current = new Map<string, Entry>();
 /** Every connection someone still holds, current or replaced. */
 const held = new Map<AcpConnection, Entry>();
-let profileDir: string | null = null;
-
-function keyFor(cwd: string): string {
-	return `${profileDir ?? ""}|${cwd.replace(/[\\/]+$/, "").toLowerCase()}`;
+function keyFor(cwd: string, accountId: string | null): string {
+	return `${accountId ?? ""}|${cwd.replace(/[\\/]+$/, "").toLowerCase()}`;
 }
 
 function clearIdle(entry: Entry): void {
@@ -41,11 +39,11 @@ function retire(entry: Entry): void {
 }
 
 /** Take a reference; pair every call with `release`. */
-export function acquire(cwd: string): AcpConnection {
-	const key = keyFor(cwd);
+export function acquire(cwd: string, accountId: string | null): AcpConnection {
+	const key = keyFor(cwd, accountId);
 	let entry = current.get(key);
 	if (!entry || entry.connection.dead) {
-		const connection = new AcpConnection(cwd, profileDir);
+		const connection = new AcpConnection(cwd, accountId);
 		const fresh: Entry = { key, connection, refs: 0, idleTimer: null };
 		connection.onExit(() => {
 			if (fresh.refs === 0) retire(fresh);
@@ -80,8 +78,12 @@ export function release(connection: AcpConnection): void {
 }
 
 /** Borrow a connection for one call (the sidebar's session list). */
-export async function withConnection<T>(cwd: string, run: (connection: AcpConnection) => Promise<T>): Promise<T> {
-	const connection = acquire(cwd);
+export async function withConnection<T>(
+	cwd: string,
+	accountId: string | null,
+	run: (connection: AcpConnection) => Promise<T>,
+): Promise<T> {
+	const connection = acquire(cwd, accountId);
 	try {
 		await connection.start();
 		return await run(connection);
@@ -95,15 +97,13 @@ export async function withConnection<T>(cwd: string, run: (connection: AcpConnec
 export function restart(connection: AcpConnection): AcpConnection {
 	if (!connection.dead) return connection;
 	release(connection);
-	return acquire(connection.cwd);
+	return acquire(connection.cwd, connection.accountId);
 }
 
-/** New connections use this account profile; idle ones from the old profile go. */
-export function setProfileDir(dir: string | null): void {
-	const next = dir && dir.trim() ? dir : null;
-	if (next === profileDir) return;
-	profileDir = next;
+/** Retire idle agents of an account (after it was removed or re-logged in). */
+export function forgetAccount(accountId: string | null): void {
 	for (const entry of [...current.values()]) {
+		if (entry.connection.accountId !== accountId) continue;
 		if (entry.refs === 0) retire(entry);
 		else current.delete(entry.key);
 	}

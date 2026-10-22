@@ -109,6 +109,18 @@ Rust는 **바이트 운반만** 한다. JSON-RPC 해석은 전부 TypeScript에�
 - **모델 출력은 아무것도 스스로 불러오면 안 된다.** 원격 `<img>`는 렌더링 순간 URL로 데이터를 흘릴 수 있으므로
   DOMPurify 훅과 CSP 양쪽에서 막는다.
 
+### 계정 전환 (v0.3)
+
+- **처음 방식(홈 폴더 교체)은 버렸다.** `USERPROFILE`/`HOME`을 계정 폴더로 바꾸면 대화 기록·설정·스킬·git 전역 설정까지 갈라진다.
+- **CLI는 `COMMAND_CODE_API_KEY`를 `auth.json`보다 먼저 쓴다** (`getCommandAuthKey`, 1.86·1.87에서 확인). 그래서 계정 = 키 하나.
+  키는 Windows 자격 증명 관리자(`keyring` crate, 서비스 `command-code-desktop`)에, 목록(id·이름)은 앱 데이터의 `accounts.json`에 둔다.
+  웹뷰는 계정 id만 알고, Rust가 CLI를 띄울 때 키를 넣는다.
+- **경로 규칙**: CLI는 `auth.json`을 `os.homedir()`(Windows에서는 `USERPROFILE`)에서, 세션 기록은 `HOME ?? USERPROFILE`에서 읽는다.
+- **계정 추가**: 앱 데이터 아래 임시 홈으로 `cmd login`을 실행하고, 끝나면 거기 생긴 키를 옮긴 뒤 임시 홈을 지운다.
+  로그인 페이지를 여는 순간 Windows가 그 폴더를 사용자 프로필로 여겨 IE 캐시 폴더(숨김·시스템·리파스 포인트)를 만들기 때문에
+  `remove_dir_all` 대신 `rmdir /s /q`로 지운다. 한 시간 넘은 임시 홈은 다음 계정 추가 때 정리한다.
+- **연결 풀 키 = 계정 + 폴더.** 채팅 탭은 열 때의 계정을 끝까지 쓴다. 전환은 새 대화부터.
+
 ## 6. 검증 기록 (2026-10-22)
 
 WebView2 디버그 포트(`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`)로 실제 앱 창을 CDP로 조작·캡처했다.
@@ -121,6 +133,9 @@ WebView2 디버그 포트(`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugg
 | 지난 대화 열기 | 0.3초 만에 기록 표시, 연결 후 중복 없음; 53개 메시지·44개 도구 세션 정상 |
 | `/model` 전환이 있는 기록 | 74개 메시지 전부 표시 |
 | 도구 카드·diff·실패 카드·할 일 패널·슬래시 메뉴·설정·라이트 테마·터미널 탭 | 화면 확인 |
+| 계정 추가(로그인 단계는 임시 홈에 `auth.json`을 써서 대신함) → 자격 증명 관리자 저장 → 전환 → `whoami` | 올바른 키: 계정A로 인식. 가짜 키: `auth.json`이 있는데도 401 → 주입된 키가 우선함을 확인 |
+| 실제 "계정 추가…" | 임시 홈에서 Command Code 로그인 화면 표시. 탭을 닫으면 로그인 프로세스와 임시 홈이 2초 안에 정리됨 |
+| 계정 지우기 | 목록·자격 증명 관리자 모두 비워짐 |
 
 ## 7. 이후 단계 (v0.3+)
 

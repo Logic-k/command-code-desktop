@@ -61,7 +61,8 @@ export class AcpConnection {
 
 	constructor(
 		readonly cwd: string,
-		readonly profileDir: string | null = null,
+		/** Saved account to run as; null runs as the CLI's own `cmd login`. */
+		readonly accountId: string | null = null,
 	) {}
 
 	/** Spawn the agent and run `initialize`; safe to call more than once. */
@@ -92,7 +93,8 @@ export class AcpConnection {
 		this.launch = await invoke<Launch>("acp_spawn", {
 			id: this.id,
 			cwd: this.cwd,
-			profileDir: this.profileDir,
+			profileDir: null,
+			accountId: this.accountId,
 			onMessage,
 			onLog,
 		});

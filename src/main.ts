@@ -39,6 +39,15 @@ interface Tab {
 	busy: boolean;
 	attention: boolean;
 	button: HTMLElement;
+	/** Runs when the tab is closed (an add-account login cleans up here). */
+	onClose?: () => void;
+}
+
+/** Mirrors `accounts::Account` in src-tauri/src/accounts.rs. */
+interface Account {
+	id: string;
+	userName: string;
+	addedAt: number;
 }
 
 // ---------------------------------------------------------------- state
@@ -51,6 +60,8 @@ const sessionCache = new Map<string, { at: number; sessions: SessionInfo[] | Err
 const tabs: Tab[] = [];
 let activeTab: Tab | null = null;
 let tabSeq = 0;
+let cliUser: string | null = null;
+let accounts: Account[] = [];
 
 const appEl = byId<HTMLDivElement>("app");
 const projectsEl = byId<HTMLElement>("projects");
@@ -199,7 +210,7 @@ async function loadSessions(cwd: string, force = false): Promise<void> {
 		renderProjects();
 	}
 	try {
-		const sessions = await pool.withConnection(cwd, (c) => c.listSessions());
+		const sessions = await pool.withConnection(cwd, activeAccountId(), (c) => c.listSessions());
 		sessions.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
 		sessionCache.set(key, { at: Date.now(), sessions });
 	} catch (error) {
@@ -305,9 +316,16 @@ async function closeTab(tab: Tab): Promise<void> {
 	const index = tabs.indexOf(tab);
 	if (index < 0) return;
 	tabs.splice(index, 1);
-	tab.view.dispose();
-	tab.view.root.remove();
-	tab.button.remove();
+	// A view that fails to tear down must not leave a ghost tab behind.
+	try {
+		tab.onClose?.();
+		tab.view.dispose();
+	} catch (error) {
+		console.warn("closing tab failed", error);
+	} finally {
+		tab.view.root.remove();
+		tab.button.remove();
+	}
 	if (activeTab === tab) activate(tabs[Math.min(index, tabs.length - 1)] ?? null);
 	else renderProjects();
 	// The closed chat may have created or renamed a session.
@@ -365,35 +383,61 @@ async function openChat(cwd: string, session?: SessionInfo, initialPrompt?: stri
 				void notify(tab, kind, body);
 			},
 			openTerminal: (dir, args) => void openTerminal(dir, args),
+			login: (accountId) => void (accountId ? addAccount() : openTerminal(cwd, ["login"], { account: null })),
 		},
-		{ cwd, sessionId: session?.sessionId, title: session?.title ?? undefined, initialPrompt },
+		{
+			cwd,
+			sessionId: session?.sessionId,
+			title: session?.title ?? undefined,
+			initialPrompt,
+			accountId: activeAccountId(),
+			accountName: accountName(activeAccountId()),
+		},
 	);
 	tab = makeTab("chat", session?.title || "새 대화", view);
 	activate(tab);
 }
 
-async function openTerminal(cwd: string, args: string[]): Promise<void> {
-	if (!(await ensureFolder(cwd))) return;
-	rememberProject(cwd);
+interface TerminalOptions {
+	/** Account to run as; defaults to the active one. null = the CLI's own login. */
+	account?: string | null;
+	/** A separate home for the CLI (the add-account login). */
+	profileDir?: string;
+	title?: string;
+	/** Not a project: don't add the folder to the sidebar. */
+	transient?: boolean;
+	onExit?: (tab: Tab) => void;
+	onClose?: () => void;
+}
+
+async function openTerminal(cwd: string, args: string[], options: TerminalOptions = {}): Promise<Tab | null> {
+	if (!(await ensureFolder(cwd))) return null;
+	if (!options.transient) rememberProject(cwd);
 	let tab: Tab | null = null;
 	const view = new TerminalView(
 		{
 			setBusy: () => undefined,
 			exited: () => {
-				if (tab) {
-					tab.title = `${tab.title} (종료)`;
-					renderTab(tab);
-				}
+				if (!tab) return;
+				tab.title = `${tab.title} (종료)`;
+				renderTab(tab);
+				options.onExit?.(tab);
 			},
 		},
 		cwd,
 		args,
 		settings.terminalFontSize,
-		settings.profileDir || null,
+		{
+			profileDir: options.profileDir ?? null,
+			accountId: options.account === undefined ? activeAccountId() : options.account,
+		},
 	);
-	tab = makeTab("terminal", args[0] === "login" ? "로그인" : `터미널 · ${basename(cwd)}`, view);
+	const title = options.title ?? (args[0] === "login" ? "로그인" : `터미널 · ${basename(cwd)}`);
+	tab = makeTab("terminal", title, view);
+	tab.onClose = options.onClose;
 	activate(tab);
 	await view.start();
+	return tab;
 }
 
 async function newChat(): Promise<void> {
@@ -474,6 +518,227 @@ function renderHome(): void {
 	);
 }
 
+// ------------------------------------------------------------- accounts
+//
+// "CLI 로그인" is whatever `cmd login` signed in as (~/.commandcode/auth.json).
+// Saved accounts are extra keys kept in Windows Credential Manager by Rust
+// (src-tauri/src/accounts.rs); picking one starts new chats and terminals
+// with that key. Sessions and settings stay shared across accounts.
+
+const accountEl = byId<HTMLDivElement>("account-switch");
+const accountMenu = h("div", { class: "account-menu hidden", role: "menu" });
+document.body.appendChild(accountMenu);
+
+/** The saved account new chats use, or null for the CLI's own login. */
+function activeAccountId(): string | null {
+	return accounts.some((a) => a.id === settings.accountId) ? settings.accountId : null;
+}
+
+function accountName(id: string | null): string {
+	if (id) return accounts.find((a) => a.id === id)?.userName ?? "알 수 없는 계정";
+	return cliUser ?? "로그인 안 됨";
+}
+
+async function refreshAccounts(): Promise<void> {
+	try {
+		const view = await invoke<{ cliUser: string | null; accounts: Account[] }>("account_list");
+		cliUser = view.cliUser;
+		accounts = view.accounts;
+	} catch (error) {
+		console.warn("account_list failed", error);
+	}
+	renderAccountSwitch();
+}
+
+function initial(name: string): string {
+	return (name.trim()[0] ?? "?").toUpperCase();
+}
+
+function renderAccountSwitch(): void {
+	const id = activeAccountId();
+	const name = accountName(id);
+	accountEl.replaceChildren(
+		h(
+			"button",
+			{
+				class: "account-btn",
+				title: "Command Code 계정 전환",
+				onclick: (event: Event) => {
+					event.stopPropagation();
+					toggleAccountMenu();
+				},
+			},
+			h("span", { class: `avatar${id || cliUser ? "" : " empty"}` }, initial(name)),
+			h(
+				"span",
+				{ class: "account-text" },
+				h("span", { class: "account-name" }, name),
+				h("span", { class: "account-sub" }, id ? "저장된 계정" : "CLI 로그인"),
+			),
+			svg(icons.chevron, "icon account-chevron"),
+		),
+	);
+}
+
+function toggleAccountMenu(force?: boolean): void {
+	const open = force ?? accountMenu.classList.contains("hidden");
+	if (!open) {
+		accountMenu.classList.add("hidden");
+		return;
+	}
+	const active = activeAccountId();
+	const item = (id: string | null, name: string, sub: string, removable: boolean) =>
+		h(
+			"div",
+			{ class: `account-item${id === active ? " active" : ""}`, role: "menuitemradio" },
+			h(
+				"button",
+				{ class: "account-pick", onclick: () => void switchAccount(id) },
+				h("span", { class: "avatar" }, initial(name)),
+				h("span", { class: "account-text" }, h("span", { class: "account-name" }, name), h("span", { class: "account-sub" }, sub)),
+				id === active ? svg(icons.check, "icon account-check") : null,
+			),
+			removable
+				? h("button", { class: "icon-btn", title: "이 계정 지우기", onclick: () => void removeAccount(id as string) }, svg(icons.close))
+				: null,
+		);
+
+	const openChats = tabs.filter((t) => t.kind === "chat").length;
+	accountMenu.replaceChildren(
+		h("div", { class: "account-menu-label" }, "새 대화를 시작할 계정"),
+		item(null, cliUser ?? "로그인 안 됨", "CLI 로그인 (cmd login)", false),
+		...accounts.map((a) => item(a.id, a.userName, "저장된 계정", true)),
+		h("div", { class: "account-sep" }),
+		h("button", { class: "account-action", onclick: () => void addAccount() }, svg(icons.plus), "계정 추가…"),
+		h(
+			"button",
+			{ class: "account-action", onclick: () => void reloginCli() },
+			svg(icons.refresh),
+			cliUser ? "CLI 로그인 계정 바꾸기…" : "CLI에 로그인…",
+		),
+		...(openChats ? [h("div", { class: "account-note" }, `열려 있는 대화 ${openChats}개는 원래 계정으로 계속됩니다.`)] : []),
+	);
+	const rect = accountEl.getBoundingClientRect();
+	accountMenu.style.left = `${rect.left}px`;
+	accountMenu.style.bottom = `${window.innerHeight - rect.top + 6}px`;
+	accountMenu.style.width = `${Math.max(rect.width, 240)}px`;
+	accountMenu.classList.remove("hidden");
+}
+
+document.addEventListener("click", (event) => {
+	if (!accountMenu.contains(event.target as Node)) toggleAccountMenu(false);
+});
+window.addEventListener("keydown", (event) => {
+	if (event.key === "Escape") toggleAccountMenu(false);
+});
+
+async function switchAccount(id: string | null): Promise<void> {
+	toggleAccountMenu(false);
+	settings = { ...settings, accountId: id ?? "" };
+	saveSettings(settings);
+	renderAccountSwitch();
+	// Session lists are shared, but re-list so a revoked key shows up now.
+	sessionCache.clear();
+	renderProjects();
+}
+
+/** `cmd login` in a throwaway home; when it exits, Rust moves the new key
+ * into Credential Manager and deletes that home. */
+async function addAccount(): Promise<void> {
+	toggleAccountMenu(false);
+	let dir: string;
+	try {
+		dir = await invoke<string>("account_login_begin");
+	} catch (error) {
+		await ask(`계정 추가를 시작하지 못했습니다: ${String(error)}`, { title: "계정 추가", kind: "error", okLabel: "확인", cancelLabel: "닫기" });
+		return;
+	}
+	let settled = false;
+	const finish = async (tab: Tab | null) => {
+		if (settled) return;
+		settled = true;
+		try {
+			const account = await invoke<Account>("account_login_finish", { dir });
+			pool.forgetAccount(account.id);
+			await refreshAccounts();
+			await switchAccount(account.id);
+			if (tab) {
+				tab.title = `로그인 완료 · ${account.userName}`;
+				renderTab(tab);
+			}
+			await ask(`${account.userName} 계정을 추가했고, 새 대화부터 이 계정을 씁니다.`, {
+				title: "계정 추가 완료",
+				kind: "info",
+				okLabel: "확인",
+				cancelLabel: "닫기",
+			});
+			if (tab) void closeTab(tab);
+		} catch (error) {
+			await ask(String(error), { title: "계정 추가", kind: "warning", okLabel: "확인", cancelLabel: "닫기" });
+		}
+	};
+	await openTerminal(dir, ["login"], {
+		account: null,
+		profileDir: dir,
+		title: "계정 추가 · 로그인",
+		transient: true,
+		onExit: (tab) => void finish(tab),
+		onClose: () => {
+			if (!settled) {
+				settled = true;
+				void invoke("account_login_cancel", { dir });
+			}
+		},
+	});
+}
+
+/** Re-run `cmd login` for the CLI's own account (the default one). */
+async function reloginCli(): Promise<void> {
+	toggleAccountMenu(false);
+	const cwd = activeTab?.view.cwd ?? activeProject;
+	if (!cwd) {
+		await ask("먼저 폴더를 하나 열어 주세요.", { title: "CLI 로그인", kind: "info", okLabel: "확인", cancelLabel: "닫기" });
+		return;
+	}
+	const note = cliUser
+		? `CLI에 로그인된 ${cliUser} 계정을 바꾸려면, 열리는 터미널에서 /logout 후 /login 하세요.`
+		: "열리는 터미널에서 로그인을 마치세요.";
+	await ask(note, { title: "CLI 로그인", kind: "info", okLabel: "터미널 열기", cancelLabel: "취소" }).then(async (ok) => {
+		if (!ok) return;
+		await openTerminal(cwd, cliUser ? [] : ["login"], {
+			account: null,
+			onExit: () => {
+				pool.forgetAccount(null);
+				void refreshAccounts();
+			},
+			onClose: () => {
+				pool.forgetAccount(null);
+				void refreshAccounts();
+			},
+		});
+	});
+}
+
+async function removeAccount(id: string): Promise<void> {
+	const account = accounts.find((a) => a.id === id);
+	toggleAccountMenu(false);
+	const ok = await ask(`${account?.userName ?? id} 계정을 이 앱에서 지울까요?\nCommand Code 계정 자체는 그대로이고, 다시 추가할 수 있습니다.`, {
+		title: "계정 지우기",
+		kind: "warning",
+		okLabel: "지우기",
+		cancelLabel: "취소",
+	});
+	if (!ok) return;
+	try {
+		await invoke("account_remove", { id });
+	} catch (error) {
+		await ask(String(error), { title: "계정 지우기", kind: "error", okLabel: "확인", cancelLabel: "닫기" });
+	}
+	pool.forgetAccount(id);
+	if (settings.accountId === id) await switchAccount(null);
+	await refreshAccounts();
+}
+
 // ------------------------------------------------------------- settings
 
 function openSettings(): void {
@@ -504,32 +769,20 @@ function openSettings(): void {
 	notifyBox.checked = settings.notify;
 	const thoughtsBox = h("input", { type: "checkbox" });
 	thoughtsBox.checked = settings.expandThoughts;
-	const profile = h("input", { class: "text", type: "text", value: settings.profileDir, placeholder: "비워 두면 기본 계정" });
-	const browse = h("button", { class: "btn", type: "button" }, "찾아보기…");
-	browse.addEventListener("click", async () => {
-		const dir = await pickFolder();
-		if (dir) profile.value = dir;
-	});
 	const fontSize = h("input", { class: "text narrow", type: "number", min: 10, max: 22, value: settings.terminalFontSize });
 
 	const save = () => {
-		const profileChanged = profile.value.trim() !== settings.profileDir;
 		settings = {
+			...settings,
 			defaultMode: mode.value as Settings["defaultMode"],
 			sendKey: sendKey.value as Settings["sendKey"],
 			theme: theme.value as Settings["theme"],
 			notify: notifyBox.checked,
 			expandThoughts: thoughtsBox.checked,
-			profileDir: profile.value.trim(),
 			terminalFontSize: Math.min(22, Math.max(10, Number(fontSize.value) || 13)),
 		};
 		saveSettings(settings);
 		applyTheme();
-		if (profileChanged) {
-			pool.setProfileDir(settings.profileDir || null);
-			sessionCache.clear();
-			renderProjects();
-		}
 		settingsEl.close();
 	};
 
@@ -543,11 +796,6 @@ function openSettings(): void {
 			field("테마", theme),
 			h("label", { class: "check" }, notifyBox, "창이 뒤에 있을 때 완료·권한 요청을 알림으로 받기"),
 			h("label", { class: "check" }, thoughtsBox, "에이전트의 생각 과정을 펼쳐서 보기"),
-			field(
-				"계정 프로필 폴더",
-				h("div", { class: "row" }, profile, browse),
-				"다른 Command Code 계정을 쓰려면 빈 폴더를 지정하세요. 그 폴더가 홈(USERPROFILE)이 되어 ~/.commandcode가 분리됩니다. 처음엔 터미널 탭에서 로그인이 필요합니다. 새로 여는 대화부터 적용됩니다.",
-			),
 			field("터미널 글자 크기", fontSize),
 			h(
 				"div",
@@ -642,14 +890,16 @@ void appWindow.onDragDropEvent(async (event) => {
 
 // Dev builds expose the shell for driving the UI over the WebView2 debug port.
 if (import.meta.env.DEV) {
-	Object.assign(window, { __cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal } });
+	Object.assign(window, {
+		__cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal, closeTab, refreshAccounts, switchAccount, addAccount },
+	});
 }
 
 // ---------------------------------------------------------------- startup
 
 void (async () => {
 	applyTheme();
-	pool.setProfileDir(settings.profileDir || null);
+	await refreshAccounts();
 	try {
 		setSidebar(localStorage.getItem("cmdc-desktop:sidebar") === "0");
 	} catch {

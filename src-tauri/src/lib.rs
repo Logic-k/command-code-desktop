@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod acp;
 pub mod launch;
 pub mod pty;
@@ -12,7 +13,7 @@ const OPEN_FOLDER_EVENT: &str = "app://open-folder";
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
-        // Must be first: a second launch (`Command Code Desktop.exe D:\project`,
+        // Must be first: a second launch (`cmdc-gui.exe D:\project`,
         // a shortcut, a script) hands its folder to the running window and exits.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(dir) = launch::dir_from_args(args.into_iter().skip(1)) {
@@ -30,6 +31,11 @@ pub fn run() {
         .manage(PtyManager::default())
         .manage(AcpManager::default())
         .invoke_handler(tauri::generate_handler![
+            accounts::account_list,
+            accounts::account_login_begin,
+            accounts::account_login_finish,
+            accounts::account_login_cancel,
+            accounts::account_remove,
             launch::cmdc_launch,
             launch::start_dir,
             launch::dir_exists,

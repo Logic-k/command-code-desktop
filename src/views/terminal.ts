@@ -45,13 +45,16 @@ export class TerminalView {
 	private readonly observer: ResizeObserver;
 	private id: string | null = null;
 	private unlisten: UnlistenFn | null = null;
+	private webgl: WebglAddon | null = null;
 
 	constructor(
 		private readonly owner: TerminalHost,
 		readonly cwd: string,
 		private readonly args: string[],
 		fontSize: number,
-		private readonly profileDir: string | null,
+		/** `profileDir` gives the CLI a separate home (add-account login);
+		 * `accountId` runs it as a saved account. */
+		private readonly identity: { profileDir?: string | null; accountId?: string | null } = {},
 	) {
 		this.host = h("div", { class: "term-host" });
 		this.root = h("section", { class: "terminal" }, this.host);
@@ -128,8 +131,9 @@ export class TerminalView {
 			this.term.open(this.host);
 			try {
 				const webgl = new WebglAddon();
-				webgl.onContextLoss(() => webgl.dispose());
+				webgl.onContextLoss(() => this.dropWebgl());
 				this.term.loadAddon(webgl);
+				this.webgl = webgl;
 			} catch {
 				// Software-only GPU: the DOM renderer is the fallback.
 			}
@@ -155,7 +159,8 @@ export class TerminalView {
 				cols: this.term.cols,
 				rows: this.term.rows,
 				args: this.args,
-				profileDir: this.profileDir,
+				profileDir: this.identity.profileDir ?? null,
+				accountId: this.identity.accountId ?? null,
 				onOutput: channel,
 			});
 			this.id = id;
@@ -192,9 +197,26 @@ export class TerminalView {
 		this.id = null;
 	}
 
+	private dropWebgl(): void {
+		const webgl = this.webgl;
+		this.webgl = null;
+		try {
+			webgl?.dispose();
+		} catch {
+			// Already torn down by a context loss.
+		}
+	}
+
 	dispose(): void {
 		void this.kill();
 		this.observer.disconnect();
-		this.term.dispose();
+		// The WebGL renderer must go before the terminal: disposing the terminal
+		// first throws inside xterm ("reading '_isDisposed'").
+		this.dropWebgl();
+		try {
+			this.term.dispose();
+		} catch (error) {
+			console.warn("terminal dispose failed", error);
+		}
 	}
 }

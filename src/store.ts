@@ -16,8 +16,8 @@ export interface Settings {
 	/** Show the agent's reasoning expanded instead of collapsed. */
 	expandThoughts: boolean;
 	theme: "system" | "dark" | "light";
-	/** Alternate USERPROFILE for a second Command Code account; empty = default. */
-	profileDir: string;
+	/** Saved account new chats run as; "" = the CLI's own `cmd login`. */
+	accountId: string;
 	terminalFontSize: number;
 }
 
@@ -32,7 +32,7 @@ export const defaultSettings: Settings = {
 	notify: true,
 	expandThoughts: false,
 	theme: "system",
-	profileDir: "",
+	accountId: "",
 	terminalFontSize: 13,
 };
 

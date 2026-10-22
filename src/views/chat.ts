@@ -37,6 +37,8 @@ export interface ChatHost {
 	/** The tab wants the user's eyes (permission prompt, finished turn). */
 	attention(kind: "permission" | "done" | "error", body: string): void;
 	openTerminal(cwd: string, args: string[]): void;
+	/** Sign the given account in again (null: the CLI's own login). */
+	login(accountId: string | null): void;
 }
 
 interface ChatOptions {
@@ -46,6 +48,9 @@ interface ChatOptions {
 	title?: string;
 	/** Send this as the first message once the session is ready. */
 	initialPrompt?: string;
+	/** Saved account this chat runs as; null runs as the CLI's own login. */
+	accountId: string | null;
+	accountName: string;
 }
 
 interface TextSegment {
@@ -181,7 +186,7 @@ export class ChatView {
 		this.cwd = options.cwd;
 		this.sessionId = options.sessionId ?? null;
 		this.title = options.title ?? "새 대화";
-		this.connection = pool.acquire(this.cwd);
+		this.connection = pool.acquire(this.cwd, options.accountId);
 
 		this.modeSelect = h("select", { class: "select hidden", title: "권한 모드 (Shift+Tab)" });
 		this.modelSelect = h("select", { class: "select select-model hidden", title: "모델" });
@@ -198,10 +203,17 @@ export class ChatView {
 			basename(this.cwd),
 		);
 
+		const accountChip = h(
+			"span",
+			{ class: "chip chip-account", title: "이 대화가 쓰는 Command Code 계정 (새 대화부터 사이드바에서 바꿀 수 있습니다)" },
+			svg(icons.user),
+			options.accountName,
+		);
 		const head = h(
 			"header",
 			{ class: "chat-head" },
 			folderBtn,
+			accountChip,
 			h("span", { class: "spacer" }),
 			this.modeSelect,
 			this.modelSelect,
@@ -352,8 +364,9 @@ export class ChatView {
 
 	/** Paint history from the transcript file; true when anything was shown. */
 	private async renderTranscript(sessionId: string): Promise<boolean> {
-		const profileDir = this.host.settings().profileDir || null;
-		const jsonl = await invoke<string | null>("read_transcript", { sessionId, profileDir }).catch(() => null);
+		// Sessions are shared by every account (only the key differs), so the
+		// transcript always lives under the regular home.
+		const jsonl = await invoke<string | null>("read_transcript", { sessionId, profileDir: null }).catch(() => null);
 		if (!jsonl) return false;
 		const updates = transcriptUpdates(jsonl);
 		for (const update of updates) this.onUpdate(update);
@@ -1201,7 +1214,7 @@ export class ChatView {
 	private showError(error: unknown, retry?: () => void): void {
 		const info = explainError(error);
 		if (info.login) {
-			this.showBanner("alert", info.text, "터미널에서 로그인", () => this.host.openTerminal(this.cwd, ["login"]));
+			this.showBanner("alert", info.text, "로그인", () => this.host.login(this.options.accountId));
 		} else if (retry) {
 			this.showBanner("alert", info.text, "다시 시도", retry);
 		} else {
@@ -1323,6 +1336,9 @@ function explainError(error: unknown): { text: string; login: boolean } {
 	const message = error instanceof Error ? error.message : String(error);
 	if (/not authenticated|cmd login/i.test(message)) {
 		return { text: "Command Code에 로그인되어 있지 않습니다.", login: true };
+	}
+	if (/401|invalid 'authorization'|invalid.*token/i.test(message)) {
+		return { text: "이 계정의 로그인 정보가 더 이상 유효하지 않습니다. 다시 로그인해 주세요.", login: true };
 	}
 	const reset = message.match(/resets at (\d{4}-\d{2}-\d{2}T[\d:.]+Z)/);
 	if ((error instanceof AcpError && error.status === 429) || /usage limit|429/.test(message)) {

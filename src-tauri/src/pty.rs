@@ -69,6 +69,7 @@ pub fn pty_spawn(
     rows: u16,
     args: Vec<String>,
     profile_dir: Option<String>,
+    account_id: Option<String>,
     on_output: Channel<String>,
 ) -> Result<Launch, String> {
     if cwd.trim().is_empty() || !Path::new(&cwd).is_dir() {
@@ -95,7 +96,7 @@ pub fn pty_spawn(
     // Seed the whole parent environment explicitly: CommandBuilder's
     // inheritance behaviour is not uniform across backends, and the child
     // needs PATH at minimum.
-    for (key, value) in child_env(profile_dir.as_deref()) {
+    for (key, value) in child_env(profile_dir.as_deref(), account_id.as_deref())? {
         cmd.env(key, value);
     }
     cmd.env("TERM", "xterm-256color");

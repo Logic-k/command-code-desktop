@@ -71,16 +71,23 @@ pub fn resolve_launch() -> Launch {
 }
 
 /// The child environment: the whole parent environment, then our overrides.
-/// `profile_dir` moves `~/.commandcode` (and every other home-relative config)
-/// to a separate account directory.
-pub fn child_env(profile_dir: Option<&str>) -> Vec<(String, String)> {
+///
+/// * `profile_dir` moves the whole home (`~/.commandcode` and every other
+///   home-relative config); only the add-account login uses it, so `cmd login`
+///   writes into a throwaway home.
+/// * `account_id` picks a saved account: its key goes in as
+///   `COMMAND_CODE_API_KEY`, which the CLI prefers over `auth.json`.
+pub fn child_env(profile_dir: Option<&str>, account_id: Option<&str>) -> Result<Vec<(String, String)>, String> {
     let mut env: Vec<(String, String)> = std::env::vars().collect();
     env.push(("CMDC_GUI".into(), "1".into()));
     if let Some(dir) = profile_dir.filter(|d| !d.is_empty()) {
         env.push(("USERPROFILE".into(), dir.into()));
         env.push(("HOME".into(), dir.into()));
     }
-    env
+    if let Some(key) = crate::accounts::api_key_for(account_id)? {
+        env.push(("COMMAND_CODE_API_KEY".into(), key));
+    }
+    Ok(env)
 }
 
 #[tauri::command]
