@@ -23,21 +23,30 @@ use crate::launch::{child_env, resolve_launch};
 /// (the CLI auto-updates itself); payload `{ from, to }`.
 pub const CLI_VERSION_EVENT: &str = "cli://version";
 
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 /// The commit this binary was built from (`build.rs`), empty if unknown.
 const BUILT_COMMIT: &str = env!("CMDC_GIT_COMMIT");
 /// The checkout this binary was built from: `src-tauri`'s parent.
 const SOURCE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 
 fn hidden(cmd: &mut Command) -> &mut Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+    crate::procs::background(cmd)
+}
+
+/// The built app's file name inside `<target>/release`.
+const EXE_NAME: &str = if cfg!(windows) { "cmdc-gui.exe" } else { "cmdc-gui" };
+
+/// A shell running one command line: `cmd /C` on Windows, `sh -c` elsewhere
+/// (pnpm is a `.cmd` shim on Windows, which only cmd.exe can start).
+fn shell(line: &str) -> Command {
+    if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C").args(line.split(' '));
+        cmd
+    } else {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", line]);
+        cmd
     }
-    cmd
 }
 
 fn strip_ansi(text: &str) -> String {
@@ -151,22 +160,7 @@ impl UpdateBuild {
     }
 }
 
-fn kill_tree(pid: u32) {
-    let _ = hidden(
-        Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null()),
-    )
-    .status();
-}
-
-fn alive(pid: u32) -> bool {
-    hidden(Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]))
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-        .unwrap_or(false)
-}
+use crate::procs::{alive, kill_tree};
 
 /// Build the latest source into the app data dir, streaming the build log.
 /// Returns the new executable's path.
@@ -205,12 +199,10 @@ pub async fn app_update_build(app: AppHandle, on_log: Channel<String>) -> Result
 
     let handle = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let run = |label: &str, args: &[&str]| -> Result<(), String> {
+        let run = |label: &str, line: &str| -> Result<(), String> {
             let _ = on_log.send(format!("$ {label}"));
             let mut child = hidden(
-                Command::new("cmd")
-                    .arg("/C")
-                    .args(args)
+                shell(line)
                     .current_dir(&dir)
                     .env("CARGO_TARGET_DIR", &target)
                     .env("CARGO_PROFILE_RELEASE_LTO", "false")
@@ -249,11 +241,11 @@ pub async fn app_update_build(app: AppHandle, on_log: Channel<String>) -> Result
             }
         };
         let started = std::time::SystemTime::now();
-        let outcome = run("pnpm install", &["pnpm", "install", "--frozen-lockfile"])
-            .and_then(|_| run("pnpm tauri build", &["pnpm", "tauri", "build", "--no-bundle"]));
+        let outcome = run("pnpm install", "pnpm install --frozen-lockfile")
+            .and_then(|_| run("pnpm tauri build", "pnpm tauri build --no-bundle"));
         let _ = std::fs::remove_file(&pid_file);
         outcome?;
-        let exe = target.join("release").join("cmdc-gui.exe");
+        let exe = target.join("release").join(EXE_NAME);
         // A build that did not write the exe (cancelled, stale) is not an update.
         let fresh = std::fs::metadata(&exe)
             .and_then(|m| m.modified())
@@ -272,8 +264,9 @@ pub async fn app_update_build(app: AppHandle, on_log: Channel<String>) -> Result
     result
 }
 
-/// Replace the running exe with `new_exe` and restart: a hidden PowerShell
-/// waits for this process to exit, copies the file, and relaunches it.
+/// Replace the running exe with `new_exe` and restart: a hidden helper
+/// (PowerShell on Windows, sh elsewhere) waits for this process to exit,
+/// copies the file, and relaunches it.
 #[tauri::command]
 pub fn app_update_apply(app: AppHandle, new_exe: String) -> Result<(), String> {
     let new_exe = PathBuf::from(new_exe);
@@ -281,23 +274,34 @@ pub fn app_update_apply(app: AppHandle, new_exe: String) -> Result<(), String> {
         return Err("새 실행 파일이 없습니다. 다시 빌드해 주세요.".into());
     }
     let current = std::env::current_exe().map_err(|e| e.to_string())?;
-    let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
-    let script = format!(
-        "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
-         $ok = $false; foreach ($i in 1..20) {{ try {{ Copy-Item -LiteralPath {src} -Destination {dst} -Force -ErrorAction Stop; $ok = $true; break }} catch {{ Start-Sleep -Milliseconds 500 }} }}; \
-         Start-Process -FilePath {dst}",
-        pid = std::process::id(),
-        src = quote(&new_exe),
-        dst = quote(&current),
-    );
-    hidden(
-        Command::new("powershell")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null()),
-    )
-    .spawn()
+    let pid = std::process::id();
+    let mut helper = if cfg!(windows) {
+        let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
+        let script = format!(
+            "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
+             $ok = $false; foreach ($i in 1..20) {{ try {{ Copy-Item -LiteralPath {src} -Destination {dst} -Force -ErrorAction Stop; $ok = $true; break }} catch {{ Start-Sleep -Milliseconds 500 }} }}; \
+             Start-Process -FilePath {dst}",
+            src = quote(&new_exe),
+            dst = quote(&current),
+        );
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script]);
+        cmd
+    } else {
+        let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"));
+        let script = format!(
+            "while kill -0 {pid} 2>/dev/null; do sleep 0.5; done; \
+             for i in $(seq 1 20); do cp -f {src} {dst} && break; sleep 0.5; done; \
+             {dst} >/dev/null 2>&1 &",
+            src = quote(&new_exe),
+            dst = quote(&current),
+        );
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &script]);
+        cmd
+    };
+    hidden(helper.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()))
+        .spawn()
     .map_err(|e| format!("업데이트 도우미를 시작하지 못했습니다: {e}"))?;
     app.exit(0);
     Ok(())

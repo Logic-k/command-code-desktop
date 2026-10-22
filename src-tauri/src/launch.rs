@@ -1,10 +1,13 @@
 //! Where the Command Code CLI lives and how to start it.
 //!
-//! `cmdc` on Windows is an npm shim (`cmdc.cmd`) that runs
-//! `node <npm-bin>/node_modules/command-code/dist/index.mjs`. We resolve that
-//! layout ourselves and spawn `node` directly, so there is no `cmd.exe` layer
-//! between the app and the CLI. If resolution fails we fall back to the shim
-//! through `%COMSPEC%`.
+//! The CLI is an npm package (`command-code`) whose bin, `cmdc`, runs
+//! `node <prefix>/node_modules/command-code/dist/index.mjs`. We resolve that
+//! entry ourselves and spawn `node` directly, so no shell sits between the app
+//! and the CLI:
+//! * Windows: `cmdc` is a `cmdc.cmd` shim next to `node_modules`; if the
+//!   layout is unexpected we fall back to the shim through `%COMSPEC%`.
+//! * macOS/Linux: `cmdc` is a symlink into the package; following it gives the
+//!   entry. The fallback runs `cmdc` itself (its `#!/usr/bin/env node` line).
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +16,7 @@ use serde::Serialize;
 /// How we decided to launch the CLI. Surfaced to the frontend for diagnostics.
 #[derive(Clone, Serialize)]
 pub struct Launch {
-    /// Executable to spawn (`node.exe`, or `%COMSPEC%` on the shim fallback).
+    /// Executable to spawn (`node`, or the shim on the fallback).
     pub program: String,
     /// Arguments that must precede the user's arguments.
     pub prefix_args: Vec<String>,
@@ -38,26 +41,39 @@ fn package_version(package_dir: &Path) -> Option<String> {
     json.get("version")?.as_str().map(str::to_string)
 }
 
+/// The user's home as Node's `os.homedir()` sees it (where the CLI keeps
+/// `~/.commandcode/auth.json`): USERPROFILE on Windows, HOME elsewhere.
+pub fn user_home() -> Option<PathBuf> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(key).map(PathBuf::from)
+}
+
+fn node_launch(node: String, entry: &Path) -> Launch {
+    // dist/index.mjs → the package dir is two levels up.
+    let package_dir = entry.parent().and_then(Path::parent);
+    Launch {
+        program: node,
+        prefix_args: vec![entry.to_string_lossy().into_owned()],
+        via: "node".to_string(),
+        entry: Some(entry.to_string_lossy().into_owned()),
+        version: package_dir.and_then(package_version),
+    }
+}
+
 /// Resolve the CLI the same way the npm shim does, without needing the shim.
+#[cfg(windows)]
 pub fn resolve_launch() -> Launch {
     let shim = find_on_path("cmdc.cmd").or_else(|| find_on_path("cmdc"));
     if let Some(dir) = shim.as_deref().and_then(Path::parent) {
-        let package_dir = dir.join("node_modules").join("command-code");
-        let entry = package_dir.join("dist").join("index.mjs");
+        let entry = dir.join("node_modules").join("command-code").join("dist").join("index.mjs");
         if entry.is_file() {
             let local_node = dir.join("node.exe");
-            let program = if local_node.is_file() {
+            let node = if local_node.is_file() {
                 local_node.to_string_lossy().into_owned()
             } else {
                 "node".to_string()
             };
-            return Launch {
-                program,
-                prefix_args: vec![entry.to_string_lossy().into_owned()],
-                via: "node".to_string(),
-                entry: Some(entry.to_string_lossy().into_owned()),
-                version: package_version(&package_dir),
-            };
+            return node_launch(node, &entry);
         }
     }
 
@@ -67,6 +83,92 @@ pub fn resolve_launch() -> Launch {
         via: "shim".to_string(),
         entry: None,
         version: None,
+    }
+}
+
+/// Resolve the CLI the same way the npm shim does, without needing the shim.
+#[cfg(not(windows))]
+pub fn resolve_launch() -> Launch {
+    let Some(bin) = find_on_path("cmdc") else {
+        return Launch {
+            program: "cmdc".to_string(),
+            prefix_args: Vec::new(),
+            via: "shim".to_string(),
+            entry: None,
+            version: None,
+        };
+    };
+    // npm links bin/cmdc → ../lib/node_modules/command-code/dist/index.mjs.
+    if let Ok(entry) = bin.canonicalize() {
+        if entry.file_name().is_some_and(|n| n == "index.mjs") && entry.is_file() {
+            // Prefer the node that sits next to the bin (nvm, volta, Homebrew
+            // keep them together); else whatever `node` PATH finds.
+            let sibling = bin.with_file_name("node");
+            let node = if sibling.is_file() {
+                sibling.to_string_lossy().into_owned()
+            } else {
+                find_on_path("node")
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "node".to_string())
+            };
+            return node_launch(node, &entry);
+        }
+    }
+    Launch {
+        program: bin.to_string_lossy().into_owned(),
+        prefix_args: Vec::new(),
+        via: "shim".to_string(),
+        entry: None,
+        version: None,
+    }
+}
+
+/// macOS starts apps from Finder/Dock with a bare PATH (`/usr/bin:/bin:…`), so
+/// `node` and `cmdc` installed through Homebrew, nvm or volta are invisible.
+/// Ask the user's login shell for its PATH once, before anything spawns, and
+/// add the usual install locations in case the shell setup is unusual.
+#[cfg(target_os = "macos")]
+pub fn adopt_login_shell_path() {
+    use std::process::{Command, Stdio};
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let from_shell = Command::new(&shell)
+        .args(["-ilc", "printf '__PATH__%s' \"$PATH\""])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|o| {
+            let text = String::from_utf8_lossy(&o.stdout).into_owned();
+            text.rsplit_once("__PATH__").map(|(_, p)| p.trim().to_string())
+        })
+        .filter(|p| !p.is_empty());
+
+    let mut parts: Vec<PathBuf> = Vec::new();
+    let mut push = |p: PathBuf| {
+        if !p.as_os_str().is_empty() && !parts.contains(&p) {
+            parts.push(p);
+        }
+    };
+    if let Some(path) = &from_shell {
+        for p in std::env::split_paths(path) {
+            push(p);
+        }
+    }
+    if let Some(current) = std::env::var_os("PATH") {
+        for p in std::env::split_paths(&current) {
+            push(p);
+        }
+    }
+    if let Some(home) = user_home() {
+        push(home.join(".volta/bin"));
+        push(home.join(".npm-global/bin"));
+    }
+    push(PathBuf::from("/opt/homebrew/bin"));
+    push(PathBuf::from("/usr/local/bin"));
+    if let Ok(joined) = std::env::join_paths(parts) {
+        // SAFETY: called first thing in `run()`, before Tauri or any of our
+        // threads start, so nothing else reads the environment concurrently.
+        unsafe { std::env::set_var("PATH", joined) };
     }
 }
 

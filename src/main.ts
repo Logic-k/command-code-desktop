@@ -37,6 +37,7 @@ import {
 } from "./store";
 import { basename, byId, h, relativeTime, svg } from "./ui/dom";
 import { icons } from "./ui/icons";
+import { isMac, keys, modHeld } from "./ui/platform";
 import { ChatView, describeError } from "./views/chat";
 import { Channel } from "@tauri-apps/api/core";
 import { TerminalView } from "./views/terminal";
@@ -91,6 +92,8 @@ function iconButton(id: string, icon: keyof typeof icons, label?: string): void 
 	button.replaceChildren(svg(icons[icon]), ...(label ? [h("span", null, label)] : []));
 }
 
+for (const id of ["collapse", "expand", "new-tab", "new-term"]) byId(id).title = keys(byId(id).title);
+document.documentElement.dataset.platform = isMac ? "mac" : "win";
 iconButton("collapse", "sidebar");
 iconButton("expand", "sidebar");
 iconButton("new-chat", "plus", "새 채팅");
@@ -291,7 +294,7 @@ function renderTab(tab: Tab): void {
 			"button",
 			{
 				class: "tab-close",
-				title: "닫기 (Ctrl+W)",
+				title: keys("닫기 (Ctrl+W)"),
 				onclick: (event: Event) => {
 					event.stopPropagation();
 					void closeTab(tab);
@@ -539,7 +542,7 @@ function renderHome(): void {
 			h(
 				"div",
 				{ class: "home-keys muted small" },
-				"Ctrl+N 새 채팅 · Ctrl+O 폴더 열기 · Ctrl+T 터미널 · Ctrl+W 탭 닫기 · Ctrl+Tab 탭 전환 · Ctrl+B 사이드바",
+				keys("Ctrl+N 새 채팅 · Ctrl+O 폴더 열기 · Ctrl+T 터미널 · Ctrl+W 탭 닫기 · Ctrl+Tab 탭 전환 · Ctrl+B 사이드바"),
 			),
 		),
 	);
@@ -1423,8 +1426,14 @@ function openUpdates(): void {
 			const behind = appInfo.commitsBehind ?? 0;
 			appStatus.replaceChildren(
 				h("div", null, h("strong", null, `Command Code Desktop ${appInfo.version}`), ` (${appInfo.commit.slice(0, 7) || "커밋 정보 없음"})`),
-				h("div", { class: "muted small" }, `소스 폴더: ${appInfo.sourceDir ?? "찾지 못함"}`),
-				appInfo.debug
+				h("div", { class: "muted small" }, `소스 폴더: ${appInfo.sourceDir ?? "없음 (설치 파일로 설치됨)"}`),
+				!appInfo.sourceDir
+					? h(
+							"div",
+							{ class: "muted small" },
+							"이 설치본은 소스 폴더와 연결되어 있지 않아 앱 안에서 다시 빌드할 수 없습니다. 새 버전은 GitHub 저장소의 Releases에서 받으세요.",
+						)
+					: appInfo.debug
 					? h("div", { class: "muted small" }, "개발 모드로 실행 중이라 소스를 고치면 바로 반영됩니다.")
 					: behind > 0
 						? h(
@@ -1585,7 +1594,7 @@ function openSettings(): void {
 	]);
 	const sendKey = select(settings.sendKey, [
 		["enter", "Enter로 보내기 (Shift+Enter 줄바꿈)"],
-		["ctrl-enter", "Ctrl+Enter로 보내기"],
+		["ctrl-enter", keys("Ctrl+Enter로 보내기")],
 	]);
 	const theme = select(settings.theme, [
 		["system", "시스템 설정 따르기"],
@@ -1644,8 +1653,7 @@ function openSettings(): void {
 // ------------------------------------------------------------ shortcuts
 
 window.addEventListener("keydown", (event) => {
-	const ctrl = event.ctrlKey || event.metaKey;
-	if (!ctrl || event.altKey) return;
+	if (!modHeld(event) || event.altKey) return;
 	const key = event.key.toLowerCase();
 	const handled = (() => {
 		if (key === "n" && !event.shiftKey) return void newChat(), true;

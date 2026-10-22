@@ -117,6 +117,29 @@ pnpm tauri build
 cmdc-gui.exe D:\project
 ```
 
+## macOS
+
+맥용 앱은 GitHub Actions에서 만듭니다(맥 앱은 맥에서만 빌드되기 때문). Apple Silicon과 Intel 맥 모두에서 돌아가는 universal `.dmg` 하나가 나옵니다.
+
+**받기**: 저장소의 **Actions → Build macOS → 최신 실행 → Artifacts**에서 `Command-Code-Desktop-macOS`를 내려받습니다. 직접 새로 만들려면 같은 화면에서 **Run workflow**를 누릅니다. `v0.5.0`처럼 버전 태그를 올리면 Releases에 초안으로도 붙습니다.
+
+**설치와 첫 실행**: 이 앱은 Apple 개발자 서명이 없어서(ad-hoc 서명만 됨) 처음 열 때 macOS가 막습니다.
+
+1. `.dmg`를 열고 앱을 **응용 프로그램** 폴더로 끌어 놓습니다.
+2. 앱을 **우클릭 → 열기 → 열기**를 누릅니다. (또는 **시스템 설정 → 개인정보 보호 및 보안**에서 "그래도 열기")
+3. "손상되었기 때문에 열 수 없습니다"가 나오면 터미널에서 한 번 실행합니다:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Command Code Desktop.app"
+```
+
+**필요한 것**: Node 22 이상, `npm i -g command-code`, 그리고 터미널에서 `cmdc login` 한 번. Homebrew, nvm, volta로 설치한 node도 찾습니다(앱이 로그인 셸의 PATH를 읽음).
+
+**맥에서 다른 점**
+- 단축키는 Ctrl 대신 ⌘ (예: ⌘N 새 채팅, ⌘W 탭 닫기). 터미널 탭에서는 ⌘C/⌘V가 복사·붙여넣기이고, Ctrl은 터미널 그대로입니다.
+- 계정 키는 macOS 키체인에 보관됩니다.
+- 앱 업데이트는 새 `.dmg`로 합니다. (앱 안의 "앱 업데이트"는 소스 폴더에서 직접 빌드한 경우에만 쓸 수 있습니다.)
+
 ## 구조
 
 설계와 근거는 [docs/DESIGN.md](docs/DESIGN.md)에 있습니다.
@@ -126,6 +149,7 @@ cmdc-gui.exe D:\project
 | `src-tauri/src/launch.rs` | CLI 위치 확인, 시작 폴더, 세션 기록 파일 읽기 |
 | `src-tauri/src/acp.rs` | `cmd acp` 프로세스 실행, 줄 단위 JSON-RPC 운반, 종료 시 프로세스 트리 정리 |
 | `src-tauri/src/pty.rs` | 터미널 탭: ConPTY로 TUI 실행 |
+| `src-tauri/src/procs.rs` | 자식 프로세스를 트리째 정리 (Windows `taskkill /T`, macOS 프로세스 그룹) |
 | `src-tauri/src/accounts.rs` | 저장된 계정: 자격 증명 관리자 보관, 계정 추가 로그인, 키 주입 |
 | `src/acp/client.ts` | JSON-RPC 클라이언트 (요청/응답, 알림, 권한 요청) |
 | `src/acp/pool.ts` | 폴더당 에이전트 프로세스 하나를 공유 |

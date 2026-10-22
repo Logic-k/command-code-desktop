@@ -72,8 +72,9 @@
 }
 
 :root {
-	--mono: "Cascadia Mono", "D2Coding", Consolas, monospace;
-	--sans: "Pretendard", "Segoe UI Variable Text", "Segoe UI", "Malgun Gothic", system-ui, sans-serif;
+	--mono: "Cascadia Mono", "SF Mono", Menlo, "D2Coding", Consolas, monospace;
+	--sans: "Pretendard", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI Variable Text", "Segoe UI",
+		"Malgun Gothic", system-ui, sans-serif;
 	--radius: 8px;
 	--side-w: 264px;
 	font-family: var(--sans);

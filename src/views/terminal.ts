@@ -12,6 +12,7 @@ import "@xterm/xterm/css/xterm.css";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Launch } from "../acp/types";
 import { h } from "../ui/dom";
+import { isMac } from "../ui/platform";
 
 export interface TerminalHost {
 	setBusy(busy: boolean): void;
@@ -64,7 +65,7 @@ export class TerminalView {
 			allowProposedApi: true,
 			cursorBlink: true,
 			cursorStyle: "bar",
-			fontFamily: '"Cascadia Mono", "D2Coding", Consolas, "Courier New", monospace',
+			fontFamily: '"Cascadia Mono", "SF Mono", Menlo, "D2Coding", Consolas, "Courier New", monospace',
 			fontSize,
 			lineHeight: 1.15,
 			scrollback: 10_000,
@@ -97,10 +98,12 @@ export class TerminalView {
 			if (this.id) void invoke("pty_resize", { id: this.id, cols, rows }).catch(() => undefined);
 		});
 
-		// Ctrl+C copies when there is a selection (otherwise it interrupts, as
-		// usual); Ctrl+V pastes. Both match Windows Terminal.
+		// Windows: Ctrl+C copies when there is a selection (otherwise it
+		// interrupts, as usual); Ctrl+V pastes, like Windows Terminal.
+		// macOS: ⌘C / ⌘V, and Ctrl keeps its terminal meaning.
 		this.term.attachCustomKeyEventHandler((event) => {
-			if (event.type !== "keydown" || !event.ctrlKey || event.shiftKey || event.altKey) return true;
+			const held = isMac ? event.metaKey : event.ctrlKey;
+			if (event.type !== "keydown" || !held || event.shiftKey || event.altKey) return true;
 			if (event.key === "c" && this.term.hasSelection()) {
 				void navigator.clipboard.writeText(this.term.getSelection());
 				this.term.clearSelection();

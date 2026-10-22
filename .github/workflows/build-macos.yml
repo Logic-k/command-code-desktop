@@ -1,0 +1,72 @@
+# Builds the macOS app (.dmg, universal: Apple Silicon + Intel).
+#
+# Run it from the Actions tab ("Run workflow"), or push a tag like v0.5.0 to
+# also attach the .dmg to a draft GitHub release. The app is ad-hoc signed,
+# not notarized: on first launch macOS asks to confirm opening it
+# (see README → macOS).
+name: Build macOS
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      # Thin LTO keeps the binary lean at a fraction of full LTO's build time
+      # (macOS runner minutes are billed at a premium).
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build universal app and dmg
+        run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg
+
+      - name: Collect artifacts
+        id: dmg
+        run: |
+          dmg=$(ls src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -n 1)
+          echo "path=$dmg" >> "$GITHUB_OUTPUT"
+          echo "Built: $dmg"
+          codesign -dv --verbose=2 "src-tauri/target/universal-apple-darwin/release/bundle/macos/"*.app 2>&1 | head -n 8 || true
+          for bin in "src-tauri/target/universal-apple-darwin/release/bundle/macos/"*.app/Contents/MacOS/*; do echo "$bin: $(lipo -archs "$bin")"; done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Command-Code-Desktop-macOS
+          path: ${{ steps.dmg.outputs.path }}
+          if-no-files-found: error
+
+      - name: Attach to a draft release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: ${{ steps.dmg.outputs.path }}

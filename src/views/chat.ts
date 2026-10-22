@@ -30,6 +30,7 @@ import { diffStats, renderDiff } from "../ui/diff";
 import { basename, h, svg } from "../ui/dom";
 import { type IconName, icons } from "../ui/icons";
 import { renderMarkdown, wireMarkdown } from "../ui/markdown";
+import { keys } from "../ui/platform";
 
 export interface ChatHost {
 	settings(): Settings;
@@ -1065,7 +1066,7 @@ export class ChatView {
 	// ------------------------------------------------------------ composer
 
 	private sendHint(): string {
-		return this.host.settings().sendKey === "enter" ? "Enter 보내기 · Shift+Enter 줄바꿈" : "Ctrl+Enter 보내기";
+		return this.host.settings().sendKey === "enter" ? "Enter 보내기 · Shift+Enter 줄바꿈" : keys("Ctrl+Enter 보내기");
 	}
 
 	private onInput(): void {

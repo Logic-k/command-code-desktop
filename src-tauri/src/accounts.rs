@@ -6,10 +6,10 @@
 //! settings, skills and the user's git config stay shared.
 //!
 //! * **CLI login** is whatever `cmd login` wrote to `auth.json` under
-//!   `os.homedir()` (USERPROFILE on Windows). Chats that pick no saved account
+//!   `os.homedir()` (USERPROFILE on Windows, HOME on macOS). Chats that pick no saved account
 //!   run as it.
-//! * **Saved accounts** keep their key in Windows Credential Manager (DPAPI,
-//!   per Windows user) and their id and name in the app data dir. No key ever
+//! * **Saved accounts** keep their key in the OS credential store (Windows
+//!   Credential Manager, macOS Keychain) and their id and name in the app data dir. No key ever
 //!   crosses into the webview: the frontend names an account by id and Rust
 //!   injects the key when it spawns the CLI.
 //!
@@ -127,9 +127,9 @@ fn read_auth(home: &Path) -> Option<AuthFile> {
     serde_json::from_str(&text).ok()
 }
 
-/// The home the CLI reads `auth.json` from: `os.homedir()`, i.e. USERPROFILE.
+/// The home the CLI reads `auth.json` from: Node's `os.homedir()`.
 fn cli_home() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE").map(PathBuf::from)
+    crate::launch::user_home()
 }
 
 /// Cheap identity of the CLI's `auth.json`: changes on login, logout and
@@ -359,6 +359,7 @@ pub async fn cli_logout() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(|| {
         let launch = resolve_launch();
         let mut cmd = std::process::Command::new(&launch.program);
+        crate::procs::background(&mut cmd);
         cmd.args(&launch.prefix_args)
             .arg("logout")
             .env_clear()
@@ -367,11 +368,6 @@ pub async fn cli_logout() -> Result<(), String> {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
         let status = cmd.status().map_err(|e| format!("cmd logout: {e}"))?;
         let still_there = cli_home().is_some_and(|home| auth_path(&home).is_file());
         if still_there {

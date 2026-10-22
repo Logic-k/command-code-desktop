@@ -22,10 +22,6 @@ use crate::launch::{Launch, child_env, resolve_launch};
 /// Emitted when an agent process exits.
 pub const EXIT_EVENT: &str = "acp://exit";
 
-/// Stops Windows from flashing a console window for the node child.
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 /// One agent process. Each part has its own lock so a slow write to one
 /// agent never blocks the registry or any other agent.
 struct Agent {
@@ -35,21 +31,12 @@ struct Agent {
 
 impl Agent {
     /// Kill the agent and everything it started (shell commands, dev servers):
-    /// killing only `node` would orphan its tool processes on Windows.
+    /// killing only `node` would orphan its tool processes.
     fn kill_tree(&self) {
         let Ok(mut child) = self.child.lock() else {
             return;
         };
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            let _ = Command::new("taskkill")
-                .args(["/PID", &child.id().to_string(), "/T", "/F"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .creation_flags(CREATE_NO_WINDOW)
-                .status();
-        }
+        crate::procs::kill_tree(child.id());
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -105,11 +92,7 @@ pub fn acp_spawn(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    crate::procs::background(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
     let stdin = child.stdin.take().ok_or("no stdin")?;

@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod acp;
 pub mod billing;
 pub mod launch;
+pub mod procs;
 pub mod pty;
 pub mod updates;
 
@@ -14,6 +15,9 @@ const OPEN_FOLDER_EVENT: &str = "app://open-folder";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    launch::adopt_login_shell_path();
+
     let app = tauri::Builder::default()
         // Must be first: a second launch (`cmdc-gui.exe D:\project`,
         // a shortcut, a script) hands its folder to the running window and exits.
