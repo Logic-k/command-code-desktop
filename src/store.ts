@@ -15,6 +15,8 @@ export interface Settings {
 	notify: boolean;
 	/** Show the agent's reasoning expanded instead of collapsed. */
 	expandThoughts: boolean;
+	/** Render LaTeX in the composer as it is typed, in a strip above the input. */
+	mathPreview: boolean;
 	theme: "system" | "dark" | "light";
 	/** Saved account new chats run as; "" = the CLI's own `cmd login`. */
 	accountId: string;
@@ -31,6 +33,7 @@ export const defaultSettings: Settings = {
 	sendKey: "enter",
 	notify: true,
 	expandThoughts: false,
+	mathPreview: true,
 	theme: "system",
 	accountId: "",
 	terminalFontSize: 13,

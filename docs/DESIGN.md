@@ -84,7 +84,7 @@ Rust는 **바이트 운반만** 한다. JSON-RPC 해석은 전부 TypeScript에�
 | `views/terminal.ts` | 터미널 탭 (v0.1 xterm 코드) |
 | `views/sidebar.ts` | 프로젝트·세션 목록 |
 | `views/tabs.ts` | 탭 관리 |
-| `ui/markdown.ts` | marked + DOMPurify + highlight.js |
+| `ui/markdown.ts` | marked + DOMPurify + highlight.js + KaTeX. 수식 스캐너(`findMath`)는 답변·내 말풍선·입력창 미리보기가 같이 쓴다 |
 | `ui/diff.ts` | 줄 단위 LCS diff → 통합 diff 화면 |
 | `store.ts` | 최근 프로젝트, 설정 (localStorage) |
 

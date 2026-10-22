@@ -1605,6 +1605,8 @@ function openSettings(): void {
 	notifyBox.checked = settings.notify;
 	const thoughtsBox = h("input", { type: "checkbox" });
 	thoughtsBox.checked = settings.expandThoughts;
+	const mathBox = h("input", { type: "checkbox" });
+	mathBox.checked = settings.mathPreview;
 	const fontSize = h("input", { class: "text narrow", type: "number", min: 10, max: 22, value: settings.terminalFontSize });
 
 	const save = () => {
@@ -1615,6 +1617,7 @@ function openSettings(): void {
 			theme: theme.value as Settings["theme"],
 			notify: notifyBox.checked,
 			expandThoughts: thoughtsBox.checked,
+			mathPreview: mathBox.checked,
 			terminalFontSize: Math.min(22, Math.max(10, Number(fontSize.value) || 13)),
 		};
 		saveSettings(settings);
@@ -1632,6 +1635,7 @@ function openSettings(): void {
 			field("테마", theme),
 			h("label", { class: "check" }, notifyBox, "창이 뒤에 있을 때 완료·권한 요청을 알림으로 받기"),
 			h("label", { class: "check" }, thoughtsBox, "에이전트의 생각 과정을 펼쳐서 보기"),
+			h("label", { class: "check" }, mathBox, "입력창에 쓴 LaTeX 수식을 입력창 위에 미리 보기"),
 			field("터미널 글자 크기", fontSize),
 			h(
 				"button",

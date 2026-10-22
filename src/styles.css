@@ -1508,6 +1508,61 @@ kbd {
 .send.stop {
 	background: var(--danger);
 }
+.composer-tool {
+	display: inline-grid;
+	place-items: center;
+	flex: none;
+	width: 34px;
+	height: 34px;
+	border: 0;
+	border-radius: 9px;
+	background: transparent;
+	color: var(--fg-dim);
+	font-size: 17px;
+	line-height: 1;
+	cursor: pointer;
+}
+.composer-tool:hover {
+	background: var(--bg-hover);
+	color: var(--fg);
+}
+
+/* Live LaTeX preview: one chip per formula found in the input, the caret's one highlighted. */
+.math-preview {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px 14px;
+	max-width: 860px;
+	max-height: 170px;
+	margin: 0 auto 6px;
+	padding: 6px 12px;
+	overflow-y: auto;
+	border: 1px dashed var(--border-strong);
+	border-radius: 10px;
+	background: var(--bg-panel);
+	color: var(--fg);
+	font-size: 14px;
+}
+.math-chip {
+	padding: 2px 6px;
+	border-radius: 6px;
+	transition: background 0.15s;
+}
+.math-chip.block {
+	flex-basis: 100%;
+}
+.math-chip.block .math-display {
+	margin: 0;
+	padding: 2px 0;
+}
+.math-chip.active {
+	background: var(--accent-soft);
+}
+/* Still being typed: no closing delimiter yet. */
+.math-chip.open {
+	opacity: 0.65;
+}
 .composer-foot {
 	display: flex;
 	align-items: center;
@@ -2203,7 +2258,8 @@ dialog {
 
 /* ------------------------------------------------------------------ math */
 
-.md .math-display {
+/* Formulas appear in agent messages (.md), in the user's own bubble and in the composer preview. */
+.math-display {
 	display: block;
 	margin: 0.6em 0 0.9em;
 	padding: 4px 2px;
@@ -2211,23 +2267,23 @@ dialog {
 	overflow-y: hidden;
 	text-align: center;
 }
-.md .math-display .katex-display {
+.math-display .katex-display {
 	margin: 0;
 }
-.md .katex {
+.katex {
 	font-size: 1.08em;
 	color: var(--fg);
 }
-.md .math-inline,
-.md .math-block {
+.math-inline,
+.math-block {
 	border-radius: 4px;
 	transition: background 0.2s;
 }
-.md .copied {
+[data-tex].copied {
 	background: var(--accent-soft);
 }
 /* KaTeX shows a formula it cannot parse in its source, in red; keep it readable. */
-.md .katex-error {
+.katex-error {
 	color: var(--danger) !important;
 	font-family: var(--mono);
 	font-size: 0.9em;

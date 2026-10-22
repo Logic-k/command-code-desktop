@@ -29,7 +29,7 @@ import type { Settings } from "../store";
 import { diffStats, renderDiff } from "../ui/diff";
 import { basename, h, svg } from "../ui/dom";
 import { type IconName, icons } from "../ui/icons";
-import { renderMarkdown, wireMarkdown } from "../ui/markdown";
+import { findMath, renderMarkdown, renderMath, renderMathText, wireMarkdown } from "../ui/markdown";
 import { keys } from "../ui/platform";
 
 export interface ChatHost {
@@ -155,6 +155,9 @@ export class ChatView {
 	private readonly planBox: HTMLElement;
 	private readonly input: HTMLTextAreaElement;
 	private readonly sendBtn: HTMLButtonElement;
+	private readonly mathBtn: HTMLButtonElement;
+	/** Rendered LaTeX for the formulas in the composer, above the input. */
+	private readonly mathPreview: HTMLElement;
 	private readonly attachRow: HTMLElement;
 	private readonly slashMenu: HTMLElement;
 	private readonly modeSelect: HTMLSelectElement;
@@ -179,6 +182,7 @@ export class ChatView {
 	private attachments: Attachment[] = [];
 	private readonly queue: string[] = [];
 	private slashIndex = 0;
+	private previewTimer: number | null = null;
 	private stickToBottom = true;
 	private renderScheduled = false;
 	private turnStarted = 0;
@@ -264,8 +268,22 @@ export class ChatView {
 		this.input.addEventListener("input", () => this.onInput());
 		this.input.addEventListener("keydown", (event) => this.onKeyDown(event));
 		this.input.addEventListener("paste", (event) => this.onPaste(event));
+		// The caret decides which formula the preview highlights; input alone misses arrow keys and clicks.
+		for (const type of ["keyup", "click", "focus"]) this.input.addEventListener(type, () => this.schedulePreview());
 
 		this.sendBtn = h("button", { class: "send", title: "보내기", onclick: () => this.onSendClick() }, svg(icons.send));
+		this.mathBtn = h(
+			"button",
+			{
+				class: "composer-tool",
+				type: "button",
+				title: "수식 넣기 — 선택한 글을 $…$로 감싸기\nShift+클릭: $$ 블록 수식",
+				onclick: (event: Event) => this.insertMath((event as MouseEvent).shiftKey),
+			},
+			"∑",
+		);
+		this.mathPreview = h("div", { class: "math-preview hidden", title: "입력창 수식 미리보기 · 두 번 클릭: LaTeX 복사" });
+		wireMarkdown(this.mathPreview, (url) => void openUrl(url));
 		this.attachRow = h("div", { class: "attachments hidden" });
 		this.slashMenu = h("div", { class: "slash hidden" });
 		this.queueChip = h("span", { class: "queue hidden" });
@@ -276,7 +294,8 @@ export class ChatView {
 			{ class: "composer" },
 			this.slashMenu,
 			this.attachRow,
-			h("div", { class: "composer-box" }, this.input, this.sendBtn),
+			this.mathPreview,
+			h("div", { class: "composer-box" }, this.input, this.mathBtn, this.sendBtn),
 			h(
 				"div",
 				{ class: "composer-foot" },
@@ -743,7 +762,8 @@ export class ChatView {
 		}
 		if (content.type === "text") {
 			this.userBubble.text += content.text;
-			this.userBubble.body.textContent = this.userBubble.text;
+			// Own text, so no markdown: only its formulas are rendered, the rest stays verbatim.
+			this.userBubble.body.innerHTML = renderMathText(this.userBubble.text);
 		} else if (content.type === "image") {
 			this.userBubble.body.appendChild(
 				h("img", { class: "bubble-img", src: `data:${content.mimeType};base64,${content.data}`, alt: "첨부 이미지" }),
@@ -1073,6 +1093,66 @@ export class ChatView {
 		this.input.style.height = "auto";
 		this.input.style.height = `${Math.min(this.input.scrollHeight, 260)}px`;
 		this.renderSlash();
+		this.schedulePreview();
+	}
+
+	// ------------------------------------------------------- math preview
+
+	/** Coalesces a burst of keystrokes into one render; formulas themselves come from the KaTeX cache. */
+	private schedulePreview(): void {
+		if (this.previewTimer !== null) return;
+		this.previewTimer = window.setTimeout(() => {
+			this.previewTimer = null;
+			this.renderMathPreview();
+		}, 80);
+	}
+
+	private renderMathPreview(): void {
+		const value = this.input.value;
+		// Lenient: a $$ or \[ block still being typed shows up as it grows.
+		const spans =
+			this.host.settings().mathPreview && /[$\\]/.test(value) ? findMath(value, true).filter((s) => s.text) : [];
+		if (!spans.length) {
+			this.mathPreview.classList.add("hidden");
+			this.mathPreview.replaceChildren();
+			return;
+		}
+		const caret = this.input.selectionStart;
+		this.mathPreview.replaceChildren(
+			...spans.map((span) => {
+				const active = caret >= span.start && caret <= span.end;
+				const chip = h("span", {
+					class: `math-chip${span.display ? " block" : ""}${span.open ? " open" : ""}${active ? " active" : ""}`,
+				});
+				chip.innerHTML = renderMath(span.text, span.display);
+				return chip;
+			}),
+		);
+		this.mathPreview.classList.remove("hidden");
+		if (this.mathPreview.scrollHeight > this.mathPreview.clientHeight) {
+			this.mathPreview.querySelector(".active")?.scrollIntoView({ block: "nearest" });
+		}
+	}
+
+	/** Wrap the selection in $…$ (or a $$ block when asked, or when it spans lines); an empty selection gets the caret inside. */
+	private insertMath(block: boolean): void {
+		const input = this.input;
+		const start = input.selectionStart;
+		const end = input.selectionEnd;
+		const selected = input.value.slice(start, end);
+		block ||= selected.includes("\n");
+		const open = block ? `${start > 0 && input.value[start - 1] !== "\n" ? "\n" : ""}$$\n` : "$";
+		const snippet = `${open}${selected}${block ? "\n$$" : "$"}`;
+		input.focus();
+		input.setSelectionRange(start, end);
+		// execCommand keeps the textarea's undo history and fires `input`; setRangeText is the fallback.
+		if (!document.execCommand("insertText", false, snippet)) {
+			input.setRangeText(snippet, start, end, "end");
+			this.onInput();
+		}
+		const caret = selected ? start + snippet.length : start + open.length;
+		input.setSelectionRange(caret, caret);
+		this.schedulePreview();
 	}
 
 	private slashMatches(): AvailableCommand[] {

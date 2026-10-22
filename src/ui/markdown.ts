@@ -1,4 +1,5 @@
-// Agent text → safe HTML. Everything goes through DOMPurify: model output is
+// Agent text → safe HTML, plus math-only rendering for the user's own text and
+// the composer preview. Everything goes through DOMPurify: model output is
 // untrusted, and a webview with IPC access must never run its markup.
 
 import DOMPurify from "dompurify";
@@ -38,6 +39,92 @@ function tex(source: string, display: boolean): string {
 	return wrapped;
 }
 
+/** A math span in plain text; `open` means it has no closing delimiter yet. */
+export interface MathSpan {
+	start: number;
+	end: number;
+	text: string;
+	display: boolean;
+	open: boolean;
+}
+
+// Sticky regexes anchor at `lastIndex`, so one set of delimiter rules serves
+// the marked tokenizer (position 0 of the remaining source) and findMath.
+const DISPLAY_DOLLAR = /\$\$([\s\S]+?)\$\$/y;
+const DISPLAY_BRACKET = /\\\[([\s\S]+?)\\\]/y;
+const INLINE_PAREN = /\\\(([\s\S]+?)\\\)/y;
+// No backticks inside: "$10, `$x$`" must not swallow the code span.
+const INLINE_DOLLAR = /\$(?![\s$])((?:\\.|[^\\$\n`])+?)(?<![\s\\])\$(?!\d)/y;
+// Display math still being typed: opened, never closed.
+const OPEN_DISPLAY = /(?:\$\$|\\\[)([\s\S]*)/y;
+
+function stickyExec(re: RegExp, src: string, at: number): RegExpExecArray | null {
+	re.lastIndex = at;
+	return re.exec(src);
+}
+
+/** The math span starting exactly at `at`, if any. `lenient` also takes unclosed display math, for a live preview. */
+function matchMathAt(src: string, at: number, lenient: boolean): MathSpan | undefined {
+	let m = stickyExec(DISPLAY_DOLLAR, src, at) ?? stickyExec(DISPLAY_BRACKET, src, at);
+	if (m) return { start: at, end: at + m[0].length, text: m[1].trim(), display: true, open: false };
+	m = stickyExec(INLINE_PAREN, src, at);
+	if (m) return { start: at, end: at + m[0].length, text: m[1].trim(), display: false, open: false };
+	m = stickyExec(INLINE_DOLLAR, src, at);
+	if (m) return { start: at, end: at + m[0].length, text: m[1], display: false, open: false };
+	if (lenient) {
+		m = stickyExec(OPEN_DISPLAY, src, at);
+		// A half-typed closer ("$$x$") is not part of the formula.
+		if (m) return { start: at, end: src.length, text: m[1].replace(/(?<!\\)\$$/, "").trim(), display: true, open: true };
+	}
+	return undefined;
+}
+
+/**
+ * Math spans in plain text, by the markdown renderer's rules: code spans and
+ * fenced code are skipped, `\$` is a literal dollar, and inline $…$ follows the
+ * pandoc rules above. With `lenient`, display math that is still open ($$… or
+ * \[… without a closer) runs to the end, so a formula can be previewed while
+ * it is being typed.
+ */
+export function findMath(src: string, lenient = false): MathSpan[] {
+	const spans: MathSpan[] = [];
+	let i = 0;
+	while (i < src.length) {
+		const ch = src[i];
+		if (ch === "`") {
+			const n = stickyExec(/`+/y, src, i)![0].length;
+			const close = new RegExp(`(?<!\`)\`{${n}}(?!\`)`, "g");
+			close.lastIndex = i + n;
+			const m = close.exec(src);
+			if (m) i = m.index + n;
+			else if (n >= 3 && (i === 0 || src[i - 1] === "\n")) break; // unterminated fence: the rest is code
+			else i += n;
+			continue;
+		}
+		if (ch === "\\") {
+			const next = src[i + 1];
+			const span = next === "[" || next === "(" ? matchMathAt(src, i, lenient) : undefined;
+			if (span) {
+				spans.push(span);
+				i = span.end;
+			} else {
+				i += 2;
+			}
+			continue;
+		}
+		if (ch === "$") {
+			const span = matchMathAt(src, i, lenient);
+			if (span) {
+				spans.push(span);
+				i = span.end;
+				continue;
+			}
+		}
+		i++;
+	}
+	return spans;
+}
+
 interface MathToken {
 	type: "blockMath" | "inlineMath";
 	raw: string;
@@ -70,14 +157,9 @@ const inlineMath: TokenizerAndRendererExtension = {
 		return i < 0 ? undefined : i;
 	},
 	tokenizer(src) {
-		let m = /^\$\$([\s\S]+?)\$\$/.exec(src) ?? /^\\\[([\s\S]+?)\\\]/.exec(src);
-		if (m) return { type: "inlineMath", raw: m[0], text: m[1].trim(), display: true } satisfies MathToken;
-		m = /^\\\(([\s\S]+?)\\\)/.exec(src);
-		if (m) return { type: "inlineMath", raw: m[0], text: m[1].trim(), display: false } satisfies MathToken;
-		// No backticks inside: "$10, `$x$`" must not swallow the code span.
-		m = /^\$(?![\s$])((?:\\.|[^\\$\n`])+?)(?<![\s\\])\$(?!\d)/.exec(src);
-		if (m) return { type: "inlineMath", raw: m[0], text: m[1], display: false } satisfies MathToken;
-		return undefined;
+		const m = matchMathAt(src, 0, false);
+		if (!m) return undefined;
+		return { type: "inlineMath", raw: src.slice(0, m.end), text: m.text, display: m.display } satisfies MathToken;
 	},
 	renderer(token) {
 		const t = token as MathToken;
@@ -120,8 +202,7 @@ DOMPurify.addHook("uponSanitizeElement", (node, data) => {
 	}
 });
 
-export function renderMarkdown(source: string): string {
-	const html = marked.parse(source, { async: false }) as string;
+function sanitize(html: string): string {
 	return DOMPurify.sanitize(html, {
 		// KaTeX output is plain spans with inline sizing styles, plus SVG for
 		// radicals and stretchy arrows; both profiles already cover it.
@@ -131,6 +212,40 @@ export function renderMarkdown(source: string): string {
 		ADD_TAGS: ["button"],
 		ADD_ATTR: ["title", "type"],
 	});
+}
+
+export function renderMarkdown(source: string): string {
+	return sanitize(marked.parse(source, { async: false }) as string);
+}
+
+function mathHtml(text: string, display: boolean): string {
+	return display ? `<span class="math-display">${tex(text, true)}</span>` : tex(text, false);
+}
+
+/** One formula as safe HTML, for the composer's live preview. */
+export function renderMath(text: string, display: boolean): string {
+	return sanitize(mathHtml(text, display));
+}
+
+/**
+ * Plain text with only its math rendered: no markdown, everything else
+ * escaped. Line breaks come from the container's `white-space: pre-wrap`, so
+ * the newline next to a display formula is dropped, or it would show as a
+ * blank line beside the block.
+ */
+export function renderMathText(source: string): string {
+	const spans = findMath(source);
+	if (!spans.length) return escapeHtml(source);
+	let html = "";
+	let last = 0;
+	for (const span of spans) {
+		let before = source.slice(last, span.start);
+		if (span.display && before.endsWith("\n")) before = before.slice(0, -1);
+		html += escapeHtml(before) + mathHtml(span.text, span.display);
+		last = span.end;
+		if (span.display && source[last] === "\n") last++;
+	}
+	return sanitize(html + escapeHtml(source.slice(last)));
 }
 
 /** Code-copy buttons, LaTeX copy and external links, wired once on a container. */
