@@ -144,3 +144,7 @@ cmdc-gui.exe D:\project
 ## 범위
 
 이미 설치하고 구독 중인 Command Code CLI를 감싸는 개인용 데스크톱 셸입니다. Command Code를 포함·재배포·재구현하지 않습니다. 사용자의 `~/.commandcode/auth.json`에서는 표시용 계정 이름만 읽습니다. 계정 추가 때는 앱이 만든 임시 폴더에 `cmd login`이 쓴 키만 자격 증명 관리자로 옮기고, 그 폴더는 바로 지웁니다.
+
+## 라이선스
+
+[MIT](LICENSE). Command Code와 Command Code CLI는 이 저장소에 포함되지 않으며 각자의 약관을 따릅니다.
