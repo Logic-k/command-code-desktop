@@ -101,6 +101,21 @@ pub fn app_info(app: AppHandle) -> AppInfo {
     let source_commit = source.as_deref().and_then(|dir| git(dir, &["rev-parse", "HEAD"]));
     let (commits_behind, changes) = match (&source, &source_commit) {
         (Some(dir), Some(head)) if !BUILT_COMMIT.is_empty() && head != BUILT_COMMIT => {
+            // The build's commit can vanish when history is rewritten (e.g.
+            // cleaned before publishing). Nothing to diff against then, but the
+            // source has still moved on: offer the update.
+            let known = git(dir, &["cat-file", "-t", BUILT_COMMIT]).is_some_and(|t| t == "commit");
+            if !known {
+                return AppInfo {
+                    version: app.package_info().version.to_string(),
+                    commit: BUILT_COMMIT.to_string(),
+                    debug: cfg!(debug_assertions),
+                    source_dir: source.as_ref().map(|d| d.to_string_lossy().into_owned()),
+                    source_commit: source_commit.clone(),
+                    commits_behind: Some(1),
+                    changes: vec!["저장소 기록이 정리되어 이 빌드와 비교할 수 없습니다. 최신 소스로 업데이트하세요.".into()],
+                };
+            }
             let range = format!("{BUILT_COMMIT}..{head}");
             let count = git(dir, &["rev-list", "--count", &range]).and_then(|n| n.parse().ok());
             let log = git(dir, &["log", "--format=%s", "-n", "20", &range])
