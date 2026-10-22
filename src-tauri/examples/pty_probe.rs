@@ -5,7 +5,7 @@
 //! what it writes, and report whether that output is a live full-screen TUI
 //! (alternate screen, cursor addressing, colour) or just a plain error line.
 //!
-//!   cargo run --manifest-path src-tauri/Cargo.toml --bin pty_probe
+//!   cargo run --manifest-path src-tauri/Cargo.toml --example pty_probe
 //!
 //! Pass `-- <ms>` to change the capture window (default 4000).
 
