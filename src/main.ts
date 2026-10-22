@@ -3,6 +3,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { homeDir } from "@tauri-apps/api/path";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
@@ -383,7 +384,7 @@ async function openChat(cwd: string, session?: SessionInfo, initialPrompt?: stri
 				void notify(tab, kind, body);
 			},
 			openTerminal: (dir, args) => void openTerminal(dir, args),
-			login: (accountId) => void (accountId ? addAccount() : openTerminal(cwd, ["login"], { account: null })),
+			login: (accountId) => void (accountId ? addAccount() : cliLogin()),
 		},
 		{
 			cwd,
@@ -521,13 +522,36 @@ function renderHome(): void {
 // ------------------------------------------------------------- accounts
 //
 // "CLI 로그인" is whatever `cmd login` signed in as (~/.commandcode/auth.json).
-// Saved accounts are extra keys kept in Windows Credential Manager by Rust
-// (src-tauri/src/accounts.rs); picking one starts new chats and terminals
-// with that key. Sessions and settings stay shared across accounts.
+// Saved accounts are extra keys Rust keeps in Windows Credential Manager
+// (src-tauri/src/accounts.rs). Everything is live:
+//
+// * switching applies to every open tab at once: chats reconnect their
+//   session as the new account (history stays), terminals restart;
+// * Rust watches the CLI's auth.json, so a login or logout done anywhere
+//   (a terminal tab, the user's own shell) re-labels the sidebar and
+//   reconnects whatever ran as the CLI login;
+// * an add-account login completes the moment `cmd login` writes its key,
+//   and its tab closes by itself.
 
 const accountEl = byId<HTMLDivElement>("account-switch");
 const accountMenu = h("div", { class: "account-menu hidden", role: "menu" });
 document.body.appendChild(accountMenu);
+const toastBox = h("div", { id: "toasts" });
+document.body.appendChild(toastBox);
+
+/** Add-account login tabs by their throwaway home. */
+const loginTabs = new Map<string, Tab>();
+/** The tab running `cmd login` for the CLI's own login, if any. */
+let cliLoginTab: Tab | null = null;
+
+function toast(text: string, tone: "info" | "ok" | "error" = "info", ms = 4500): void {
+	const el = h("div", { class: `toast toast-${tone}` }, text);
+	toastBox.appendChild(el);
+	setTimeout(() => {
+		el.classList.add("leaving");
+		setTimeout(() => el.remove(), 300);
+	}, ms);
+}
 
 /** The saved account new chats use, or null for the CLI's own login. */
 function activeAccountId(): string | null {
@@ -548,6 +572,26 @@ async function refreshAccounts(): Promise<void> {
 		console.warn("account_list failed", error);
 	}
 	renderAccountSwitch();
+	if (!accountMenu.classList.contains("hidden")) toggleAccountMenu(true);
+}
+
+/** Point every open tab at `accountId`. `force` reconnects tabs already on it
+ * (their login changed underneath). Returns how many tabs reconnect. */
+function applyAccountToTabs(accountId: string | null, force = false): number {
+	const name = accountName(accountId);
+	let moved = 0;
+	for (const tab of tabs) {
+		const view = tab.view;
+		if (view instanceof ChatView) {
+			const differs = view.accountId !== accountId;
+			if (differs || force) moved += 1;
+			view.setAccount(accountId, name, force && !differs);
+		} else if (!view.isLogin && (view.accountId !== accountId || force)) {
+			moved += 1;
+			void view.switchAccount(accountId, name);
+		}
+	}
+	return moved;
 }
 
 function initial(name: string): string {
@@ -557,25 +601,58 @@ function initial(name: string): string {
 function renderAccountSwitch(): void {
 	const id = activeAccountId();
 	const name = accountName(id);
+	const loggedOut = !id && !cliUser;
 	accountEl.replaceChildren(
 		h(
 			"button",
 			{
-				class: "account-btn",
-				title: "Command Code 계정 전환",
+				class: `account-btn${loggedOut ? " logged-out" : ""}`,
+				title: "계정 · 로그인 · 로그아웃",
 				onclick: (event: Event) => {
 					event.stopPropagation();
 					toggleAccountMenu();
 				},
 			},
-			h("span", { class: `avatar${id || cliUser ? "" : " empty"}` }, initial(name)),
+			h("span", { class: `avatar${loggedOut ? " empty" : ""}` }, loggedOut ? "!" : initial(name)),
 			h(
 				"span",
 				{ class: "account-text" },
 				h("span", { class: "account-name" }, name),
-				h("span", { class: "account-sub" }, id ? "저장된 계정" : "CLI 로그인"),
+				h("span", { class: "account-sub" }, loggedOut ? "눌러서 로그인" : id ? "저장된 계정" : "CLI 로그인"),
 			),
 			svg(icons.chevron, "icon account-chevron"),
+		),
+	);
+}
+
+interface RowAction {
+	label: string;
+	run: () => void;
+	danger?: boolean;
+}
+
+function accountRow(id: string | null, name: string, sub: string, selectable: boolean, action: RowAction): HTMLElement {
+	const active = selectable && id === activeAccountId();
+	return h(
+		"div",
+		{ class: `account-item${active ? " active" : ""}`, role: "menuitemradio" },
+		h(
+			"button",
+			{ class: "account-pick", disabled: !selectable, onclick: () => void switchAccount(id) },
+			h("span", { class: `avatar${selectable ? "" : " empty"}` }, selectable ? initial(name) : "!"),
+			h("span", { class: "account-text" }, h("span", { class: "account-name" }, name), h("span", { class: "account-sub" }, sub)),
+			active ? svg(icons.check, "icon account-check") : null,
+		),
+		h(
+			"button",
+			{
+				class: `account-act${action.danger ? " danger" : ""}`,
+				onclick: (event: Event) => {
+					event.stopPropagation();
+					action.run();
+				},
+			},
+			action.label,
 		),
 	);
 }
@@ -586,42 +663,30 @@ function toggleAccountMenu(force?: boolean): void {
 		accountMenu.classList.add("hidden");
 		return;
 	}
-	const active = activeAccountId();
-	const item = (id: string | null, name: string, sub: string, removable: boolean) =>
-		h(
-			"div",
-			{ class: `account-item${id === active ? " active" : ""}`, role: "menuitemradio" },
-			h(
-				"button",
-				{ class: "account-pick", onclick: () => void switchAccount(id) },
-				h("span", { class: "avatar" }, initial(name)),
-				h("span", { class: "account-text" }, h("span", { class: "account-name" }, name), h("span", { class: "account-sub" }, sub)),
-				id === active ? svg(icons.check, "icon account-check") : null,
-			),
-			removable
-				? h("button", { class: "icon-btn", title: "이 계정 지우기", onclick: () => void removeAccount(id as string) }, svg(icons.close))
-				: null,
-		);
-
-	const openChats = tabs.filter((t) => t.kind === "chat").length;
 	accountMenu.replaceChildren(
-		h("div", { class: "account-menu-label" }, "새 대화를 시작할 계정"),
-		item(null, cliUser ?? "로그인 안 됨", "CLI 로그인 (cmd login)", false),
-		...accounts.map((a) => item(a.id, a.userName, "저장된 계정", true)),
-		h("div", { class: "account-sep" }),
-		h("button", { class: "account-action", onclick: () => void addAccount() }, svg(icons.plus), "계정 추가…"),
-		h(
-			"button",
-			{ class: "account-action", onclick: () => void reloginCli() },
-			svg(icons.refresh),
-			cliUser ? "CLI 로그인 계정 바꾸기…" : "CLI에 로그인…",
+		h("div", { class: "account-menu-label" }, "계정"),
+		cliUser
+			? accountRow(null, cliUser, "CLI 로그인 (cmd login)", true, {
+					label: "로그아웃",
+					run: () => void cliLogout(),
+					danger: true,
+				})
+			: accountRow(null, "CLI 로그인 안 됨", "cmd login", false, { label: "로그인", run: () => void cliLogin() }),
+		...accounts.map((a) =>
+			accountRow(a.id, a.userName, "저장된 계정", true, {
+				label: "로그아웃",
+				run: () => void removeAccount(a.id),
+				danger: true,
+			}),
 		),
-		...(openChats ? [h("div", { class: "account-note" }, `열려 있는 대화 ${openChats}개는 원래 계정으로 계속됩니다.`)] : []),
+		h("div", { class: "account-sep" }),
+		h("button", { class: "account-action", onclick: () => void addAccount() }, svg(icons.plus), "다른 계정으로 로그인…"),
+		h("div", { class: "account-note" }, "계정을 바꾸면 열려 있는 대화도 바로 그 계정으로 다시 연결됩니다. 대화 내용은 그대로 남습니다."),
 	);
 	const rect = accountEl.getBoundingClientRect();
 	accountMenu.style.left = `${rect.left}px`;
 	accountMenu.style.bottom = `${window.innerHeight - rect.top + 6}px`;
-	accountMenu.style.width = `${Math.max(rect.width, 240)}px`;
+	accountMenu.style.width = `${Math.max(rect.width, 280)}px`;
 	accountMenu.classList.remove("hidden");
 }
 
@@ -634,110 +699,148 @@ window.addEventListener("keydown", (event) => {
 
 async function switchAccount(id: string | null): Promise<void> {
 	toggleAccountMenu(false);
+	const previous = activeAccountId();
 	settings = { ...settings, accountId: id ?? "" };
 	saveSettings(settings);
 	renderAccountSwitch();
-	// Session lists are shared, but re-list so a revoked key shows up now.
 	sessionCache.clear();
 	renderProjects();
+	const moved = applyAccountToTabs(activeAccountId());
+	if (previous !== activeAccountId()) {
+		const name = accountName(activeAccountId());
+		toast(moved ? `${name} 계정으로 전환 · 열린 탭 ${moved}개 다시 연결` : `${name} 계정으로 전환했습니다`, "ok");
+	}
 }
 
-/** `cmd login` in a throwaway home; when it exits, Rust moves the new key
- * into Credential Manager and deletes that home. */
+/** `cmd login` in a throwaway home. Rust watches that home and fires
+ * `accounts://login-complete` the moment the key lands. */
 async function addAccount(): Promise<void> {
 	toggleAccountMenu(false);
 	let dir: string;
 	try {
 		dir = await invoke<string>("account_login_begin");
 	} catch (error) {
-		await ask(`계정 추가를 시작하지 못했습니다: ${String(error)}`, { title: "계정 추가", kind: "error", okLabel: "확인", cancelLabel: "닫기" });
+		toast(`계정 추가를 시작하지 못했습니다: ${String(error)}`, "error");
 		return;
 	}
-	let settled = false;
-	const finish = async (tab: Tab | null) => {
-		if (settled) return;
-		settled = true;
-		try {
-			const account = await invoke<Account>("account_login_finish", { dir });
-			pool.forgetAccount(account.id);
-			await refreshAccounts();
-			await switchAccount(account.id);
-			if (tab) {
-				tab.title = `로그인 완료 · ${account.userName}`;
-				renderTab(tab);
-			}
-			await ask(`${account.userName} 계정을 추가했고, 새 대화부터 이 계정을 씁니다.`, {
-				title: "계정 추가 완료",
-				kind: "info",
-				okLabel: "확인",
-				cancelLabel: "닫기",
-			});
-			if (tab) void closeTab(tab);
-		} catch (error) {
-			await ask(String(error), { title: "계정 추가", kind: "warning", okLabel: "확인", cancelLabel: "닫기" });
-		}
-	};
-	await openTerminal(dir, ["login"], {
+	const tab = await openTerminal(dir, ["login"], {
 		account: null,
 		profileDir: dir,
-		title: "계정 추가 · 로그인",
+		title: "로그인 · 브라우저에서 계속",
 		transient: true,
-		onExit: (tab) => void finish(tab),
 		onClose: () => {
-			if (!settled) {
-				settled = true;
-				void invoke("account_login_cancel", { dir });
-			}
+			loginTabs.delete(dir);
+			void invoke("account_login_cancel", { dir });
 		},
 	});
+	if (tab) loginTabs.set(dir, tab);
+	toast("브라우저에서 로그인하세요. 끝나면 이 탭은 저절로 닫힙니다.");
 }
 
-/** Re-run `cmd login` for the CLI's own account (the default one). */
-async function reloginCli(): Promise<void> {
+/** `cmd login` for the CLI's own login, in the user's real home. */
+async function cliLogin(): Promise<void> {
 	toggleAccountMenu(false);
-	const cwd = activeTab?.view.cwd ?? activeProject;
-	if (!cwd) {
-		await ask("먼저 폴더를 하나 열어 주세요.", { title: "CLI 로그인", kind: "info", okLabel: "확인", cancelLabel: "닫기" });
+	if (cliLoginTab && tabs.includes(cliLoginTab)) {
+		activate(cliLoginTab);
 		return;
 	}
-	const note = cliUser
-		? `CLI에 로그인된 ${cliUser} 계정을 바꾸려면, 열리는 터미널에서 /logout 후 /login 하세요.`
-		: "열리는 터미널에서 로그인을 마치세요.";
-	await ask(note, { title: "CLI 로그인", kind: "info", okLabel: "터미널 열기", cancelLabel: "취소" }).then(async (ok) => {
-		if (!ok) return;
-		await openTerminal(cwd, cliUser ? [] : ["login"], {
-			account: null,
-			onExit: () => {
-				pool.forgetAccount(null);
-				void refreshAccounts();
-			},
-			onClose: () => {
-				pool.forgetAccount(null);
-				void refreshAccounts();
-			},
-		});
+	const home = await homeDir();
+	cliLoginTab = await openTerminal(home, ["login"], {
+		account: null,
+		title: "CLI 로그인 · 브라우저에서 계속",
+		transient: true,
+		onClose: () => {
+			cliLoginTab = null;
+		},
 	});
+	toast("브라우저에서 로그인하세요. 끝나면 이 탭은 저절로 닫힙니다.");
+}
+
+async function cliLogout(): Promise<void> {
+	toggleAccountMenu(false);
+	const ok = await ask(`${cliUser ?? "CLI"} 계정에서 로그아웃할까요?\nCLI 로그인을 쓰던 대화는 다시 로그인할 때까지 멈춥니다.`, {
+		title: "로그아웃",
+		kind: "warning",
+		okLabel: "로그아웃",
+		cancelLabel: "취소",
+	});
+	if (!ok) return;
+	try {
+		await invoke("cli_logout");
+		// The auth watcher reports the change and reconnects affected tabs.
+	} catch (error) {
+		toast(String(error), "error");
+	}
 }
 
 async function removeAccount(id: string): Promise<void> {
-	const account = accounts.find((a) => a.id === id);
 	toggleAccountMenu(false);
-	const ok = await ask(`${account?.userName ?? id} 계정을 이 앱에서 지울까요?\nCommand Code 계정 자체는 그대로이고, 다시 추가할 수 있습니다.`, {
-		title: "계정 지우기",
+	const name = accounts.find((a) => a.id === id)?.userName ?? id;
+	const ok = await ask(`${name} 계정에서 로그아웃할까요?\n이 앱에 저장된 키를 지웁니다. 다시 쓰려면 다시 로그인하면 됩니다.`, {
+		title: "로그아웃",
 		kind: "warning",
-		okLabel: "지우기",
+		okLabel: "로그아웃",
 		cancelLabel: "취소",
 	});
 	if (!ok) return;
 	try {
 		await invoke("account_remove", { id });
 	} catch (error) {
-		await ask(String(error), { title: "계정 지우기", kind: "error", okLabel: "확인", cancelLabel: "닫기" });
+		toast(String(error), "error");
+		return;
 	}
 	pool.forgetAccount(id);
-	if (settings.accountId === id) await switchAccount(null);
+	const wasActive = activeAccountId() === id;
 	await refreshAccounts();
+	if (wasActive) await switchAccount(null);
+	// Tabs still on the removed account follow the active one.
+	applyAccountToTabs(activeAccountId());
+	toast(`${name} 계정에서 로그아웃했습니다`, "ok");
 }
+
+function closeLoginTab(tab: Tab | null | undefined): void {
+	if (!tab || !tabs.includes(tab)) return;
+	tab.onClose = undefined;
+	void closeTab(tab);
+}
+
+void listen<{ dir: string; account: Account }>("accounts://login-complete", async (event) => {
+	const { dir, account } = event.payload;
+	closeLoginTab(loginTabs.get(dir));
+	loginTabs.delete(dir);
+	// A re-login replaces the key: agents on the old key must go.
+	pool.forgetAccount(account.id);
+	await refreshAccounts();
+	const already = activeAccountId() === account.id;
+	await switchAccount(account.id);
+	if (already) applyAccountToTabs(account.id, true);
+	toast(`${account.userName} 로그인 완료`, "ok");
+});
+
+void listen<{ dir: string; error: string }>("accounts://login-failed", (event) => {
+	closeLoginTab(loginTabs.get(event.payload.dir));
+	loginTabs.delete(event.payload.dir);
+	toast(`로그인 정보를 저장하지 못했습니다: ${event.payload.error}`, "error", 8000);
+});
+
+void listen("accounts://changed", async () => {
+	const before = cliUser;
+	await refreshAccounts();
+	pool.forgetAccount(null);
+	if (cliUser && cliLoginTab) {
+		closeLoginTab(cliLoginTab);
+		cliLoginTab = null;
+	}
+	const moved = activeAccountId() === null ? applyAccountToTabs(null, true) : 0;
+	const what = !cliUser
+		? "CLI에서 로그아웃했습니다"
+		: !before
+			? `CLI에 ${cliUser}(으)로 로그인했습니다`
+			: before !== cliUser
+				? `CLI 계정이 ${cliUser}(으)로 바뀌었습니다`
+				: `${cliUser} 로그인 정보가 갱신됐습니다`;
+	toast(moved ? `${what} · 열린 탭 ${moved}개 다시 연결` : what, cliUser ? "ok" : "info");
+});
 
 // ------------------------------------------------------------- settings
 
@@ -891,7 +994,7 @@ void appWindow.onDragDropEvent(async (event) => {
 // Dev builds expose the shell for driving the UI over the WebView2 debug port.
 if (import.meta.env.DEV) {
 	Object.assign(window, {
-		__cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal, closeTab, refreshAccounts, switchAccount, addAccount },
+		__cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal, closeTab, refreshAccounts, switchAccount, addAccount, cliLogin },
 	});
 }
 

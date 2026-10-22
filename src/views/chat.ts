@@ -156,6 +156,7 @@ export class ChatView {
 	private readonly statusLine: HTMLElement;
 	private readonly jumpBtn: HTMLButtonElement;
 	private readonly queueChip: HTMLElement;
+	private readonly accountChip: HTMLElement;
 
 	// Conversation state
 	private message: TextSegment | null = null;
@@ -177,6 +178,10 @@ export class ChatView {
 	private hasContent = false;
 	/** History came from the transcript file; drop the agent's own replay. */
 	private suppressReplay = false;
+	/** An account change arrived mid-turn; rebind once the turn ends. */
+	private rebindPending = false;
+	/** Bumped by every open(); an older open() that sees a newer value stops. */
+	private openGen = 0;
 	private disposed = false;
 
 	constructor(
@@ -203,17 +208,16 @@ export class ChatView {
 			basename(this.cwd),
 		);
 
-		const accountChip = h(
-			"span",
-			{ class: "chip chip-account", title: "이 대화가 쓰는 Command Code 계정 (새 대화부터 사이드바에서 바꿀 수 있습니다)" },
-			svg(icons.user),
-			options.accountName,
-		);
+		this.accountChip = h("span", {
+			class: "chip chip-account",
+			title: "이 대화가 쓰는 Command Code 계정. 사이드바에서 계정을 바꾸면 이 대화도 바로 따라갑니다.",
+		});
+		this.renderAccountChip();
 		const head = h(
 			"header",
 			{ class: "chat-head" },
 			folderBtn,
-			accountChip,
+			this.accountChip,
 			h("span", { class: "spacer" }),
 			this.modeSelect,
 			this.modelSelect,
@@ -293,46 +297,58 @@ export class ChatView {
 	// ----------------------------------------------------------- lifecycle
 
 	private async open(): Promise<void> {
+		// Every open() is one attempt to bind this chat to `this.connection`. A
+		// newer attempt (an account switch, a reconnect) or a closed tab makes
+		// this one stale: it stops at its next await and cleans up only what it
+		// created itself, on the connection it was started on.
+		const gen = ++this.openGen;
+		const connection = this.connection;
+		const stale = () => this.disposed || gen !== this.openGen;
+		const closeOn = (sessionId: string) => {
+			if (connection.alive) void connection.request("session/close", { sessionId }).catch(() => undefined);
+		};
+
 		// History first: the transcript file is local and instant, while a cold
 		// `cmd acp` start takes 10-20 s.
 		const rendered = this.sessionId && !this.hasContent ? await this.renderTranscript(this.sessionId) : this.hasContent;
-		if (this.disposed) return;
+		if (stale()) return;
 		this.setStatus(rendered ? "세션에 연결하는 중… (입력은 미리 해 두셔도 됩니다)" : "에이전트 시작 중…", true);
 		const slow = window.setTimeout(() => {
-			if (!this.ready && !this.disposed && this.statusLine.textContent?.endsWith("중…")) {
+			if (!this.ready && !stale() && this.statusLine.textContent?.endsWith("중…")) {
 				this.setStatus(`${this.statusLine.textContent} 처음 시작은 10~20초 걸릴 수 있습니다.`, true);
 			}
 		}, 4000);
 		try {
-			await this.connection.start();
-			if (this.disposed) return;
+			await connection.start();
+			if (stale()) return;
 			this.detachExit?.();
-			this.detachExit = this.connection.onExit((code) => this.onAgentExit(code));
+			this.detachExit = connection.onExit((code) => this.onAgentExit(code));
 			let state: SessionState;
 			if (this.sessionId) {
+				const sessionId = this.sessionId;
 				this.suppressReplay = rendered;
-				this.attachSession(this.sessionId);
-				const loaded = await this.connection.request<Omit<SessionState, "sessionId">>("session/load", {
-					sessionId: this.sessionId,
+				this.attachSession(sessionId);
+				const loaded = await connection.request<Omit<SessionState, "sessionId">>("session/load", {
+					sessionId,
 					cwd: this.cwd,
 					mcpServers: [],
 				});
-				state = { sessionId: this.sessionId, ...loaded };
+				if (stale()) return closeOn(sessionId);
+				state = { sessionId, ...loaded };
 				this.suppressReplay = false;
 				this.closeSegments();
 			} else {
-				state = await this.connection.request<SessionState>("session/new", { cwd: this.cwd, mcpServers: [] });
+				state = await connection.request<SessionState>("session/new", { cwd: this.cwd, mcpServers: [] });
+				// dispose() or a rebind could not close a session they did not know about.
+				if (stale()) return closeOn(state.sessionId);
 				this.sessionId = state.sessionId;
 				this.attachSession(state.sessionId);
 			}
-			// Closed while the session was being set up: dispose() could not
-			// close a session it did not know about yet.
-			if (this.disposed) return this.abandon();
 			this.applyState(state);
 			const wanted = this.host.settings().defaultMode;
 			if (!this.options.sessionId && wanted !== "default" && this.modes.some((m) => m.id === wanted)) {
 				await this.changeMode(wanted);
-				if (this.disposed) return this.abandon();
+				if (stale()) return;
 			}
 			this.ready = true;
 			this.setStatus("");
@@ -346,20 +362,12 @@ export class ChatView {
 			if (next !== undefined) void this.send(next);
 		} catch (error) {
 			this.suppressReplay = false;
-			if (this.disposed) return;
+			if (stale()) return;
 			this.setStatus("");
 			this.showError(error, () => void this.reconnect());
 		} finally {
 			window.clearTimeout(slow);
 		}
-	}
-
-	private abandon(): void {
-		if (this.sessionId && this.connection.alive) {
-			void this.connection.request("session/close", { sessionId: this.sessionId }).catch(() => undefined);
-		}
-		this.detach?.();
-		this.detach = null;
 	}
 
 	/** Paint history from the transcript file; true when anything was shown. */
@@ -399,6 +407,55 @@ export class ChatView {
 		} else {
 			this.sessionId = null;
 		}
+		await this.open();
+	}
+
+	get accountId(): string | null {
+		return this.options.accountId;
+	}
+
+	private renderAccountChip(): void {
+		this.accountChip.replaceChildren(svg(icons.user), this.options.accountName);
+	}
+
+	/**
+	 * Run this chat as another account from now on. The session is closed on
+	 * the old agent and loaded on one started with the new key; the visible
+	 * history stays. `force` reconnects even for the same account (its login
+	 * changed underneath, e.g. a CLI re-login). A running turn finishes first.
+	 */
+	setAccount(accountId: string | null, accountName: string, force = false): void {
+		const changed = accountId !== this.options.accountId;
+		this.options.accountName = accountName;
+		this.renderAccountChip();
+		if (!changed && !force) return;
+		this.options.accountId = accountId;
+		if (this.busy) {
+			this.rebindPending = true;
+			this.setStatus(`이번 작업이 끝나면 ${accountName} 계정으로 다시 연결합니다.`, true);
+			return;
+		}
+		void this.rebind();
+	}
+
+	private async rebind(): Promise<void> {
+		this.rebindPending = false;
+		if (this.disposed) return;
+		this.ready = false;
+		if (this.sessionId && this.connection.alive) {
+			void this.connection.request("session/close", { sessionId: this.sessionId }).catch(() => undefined);
+		}
+		this.detach?.();
+		this.detach = null;
+		this.detachExit?.();
+		this.detachExit = null;
+		pool.release(this.connection);
+		this.connection = pool.acquire(this.cwd, this.options.accountId);
+		this.hideBanner();
+		// History already on screen stays; an empty chat just starts over.
+		if (this.sessionId && this.hasContent) this.options.sessionId = this.sessionId;
+		else this.sessionId = null;
+		this.appendNote(`${this.options.accountName} 계정으로 다시 연결했습니다.`);
 		await this.open();
 	}
 
@@ -1143,6 +1200,11 @@ export class ChatView {
 			this.finishTurnUi();
 		}
 
+		if (this.rebindPending) {
+			// The rebind's open() sends whatever is queued once reconnected.
+			void this.rebind();
+			return;
+		}
 		const next = this.queue.shift();
 		this.renderQueue();
 		if (next !== undefined && !this.disposed) void this.send(next);

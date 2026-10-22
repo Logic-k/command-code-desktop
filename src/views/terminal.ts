@@ -46,6 +46,7 @@ export class TerminalView {
 	private id: string | null = null;
 	private unlisten: UnlistenFn | null = null;
 	private webgl: WebglAddon | null = null;
+	private switching: Promise<void> = Promise.resolve();
 
 	constructor(
 		private readonly owner: TerminalHost,
@@ -54,7 +55,7 @@ export class TerminalView {
 		fontSize: number,
 		/** `profileDir` gives the CLI a separate home (add-account login);
 		 * `accountId` runs it as a saved account. */
-		private readonly identity: { profileDir?: string | null; accountId?: string | null } = {},
+		private identity: { profileDir?: string | null; accountId?: string | null } = {},
 	) {
 		this.host = h("div", { class: "term-host" });
 		this.root = h("section", { class: "terminal" }, this.host);
@@ -168,6 +169,29 @@ export class TerminalView {
 			this.term.writeln(`\x1b[31m실행 실패: ${String(error)}\x1b[0m`);
 		}
 		this.term.focus();
+	}
+
+	/** A login terminal (its own throwaway home) never follows account switches. */
+	get isLogin(): boolean {
+		return Boolean(this.identity.profileDir);
+	}
+
+	get accountId(): string | null {
+		return this.identity.accountId ?? null;
+	}
+
+	/** Restart the TUI as another account; it is a fresh CLI process, so the
+	 * user resumes with /resume if they were mid-conversation. */
+	switchAccount(accountId: string | null, accountName: string): Promise<void> {
+		// Chained, so two quick switches never run two TUIs at once.
+		this.switching = this.switching.then(async () => {
+			this.identity = { ...this.identity, accountId };
+			await this.kill();
+			this.term.reset();
+			this.term.writeln(`\x1b[2m[${accountName} 계정으로 다시 시작합니다. 이전 대화는 /resume]\x1b[0m`);
+			await this.start();
+		});
+		return this.switching;
 	}
 
 	async restart(): Promise<void> {

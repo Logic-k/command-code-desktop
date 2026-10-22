@@ -30,12 +30,17 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(PtyManager::default())
         .manage(AcpManager::default())
+        .manage(accounts::PendingLogins::default())
+        .setup(|app| {
+            accounts::start(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             accounts::account_list,
             accounts::account_login_begin,
-            accounts::account_login_finish,
             accounts::account_login_cancel,
             accounts::account_remove,
+            accounts::cli_logout,
             launch::cmdc_launch,
             launch::start_dir,
             launch::dir_exists,
