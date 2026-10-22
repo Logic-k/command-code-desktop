@@ -5,6 +5,9 @@
 # also attach both installers to a draft GitHub release. The macOS app is
 # ad-hoc signed, not notarized: on first launch macOS asks to confirm opening
 # it (see README → macOS).
+#
+# The file keeps its original name (build-macos.yml) so existing links and
+# `gh workflow run build-macos.yml` keep working.
 name: Build
 
 on:
