@@ -19,6 +19,10 @@ use tauri::{AppHandle, Manager};
 
 use crate::launch::{child_env, resolve_launch};
 
+/// Emitted when the installed CLI version changes while the app runs
+/// (the CLI auto-updates itself); payload `{ from, to }`.
+pub const CLI_VERSION_EVENT: &str = "cli://version";
+
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -206,6 +210,96 @@ pub fn app_update_apply(app: AppHandle, new_exe: String) -> Result<(), String> {
     .map_err(|e| format!("업데이트 도우미를 시작하지 못했습니다: {e}"))?;
     app.exit(0);
     Ok(())
+}
+
+#[derive(Clone, Serialize)]
+struct VersionChange {
+    from: Option<String>,
+    to: Option<String>,
+}
+
+/// Watch the installed CLI version. `resolve_launch` re-reads the npm install
+/// on every spawn, so new agents already get a new version; this tells the
+/// frontend so it can move running chats over as well.
+pub fn start_version_watch(app: &AppHandle) {
+    use tauri::Emitter;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let mut last = resolve_launch().version;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+            let now = resolve_launch().version;
+            if now != last {
+                let _ = app.emit(
+                    CLI_VERSION_EVENT,
+                    VersionChange {
+                        from: last.clone(),
+                        to: now.clone(),
+                    },
+                );
+                last = now;
+            }
+        }
+    });
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Check {
+    pub name: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+/// What this app relies on inside the installed CLI, checked against its
+/// bundle so a CLI update that changes one of them is noticed instead of
+/// failing quietly. Runtime checks (ACP handshake, catalog, billing) are done
+/// by the frontend with the live data it already has.
+#[tauri::command]
+pub fn cli_compat() -> Vec<Check> {
+    let launch = resolve_launch();
+    let mut checks = vec![Check {
+        name: "CLI 실행 경로".into(),
+        ok: launch.via == "node",
+        detail: launch
+            .entry
+            .clone()
+            .unwrap_or_else(|| "npm 심으로 실행 (node 경로를 찾지 못함)".into()),
+    }];
+    let bundle = launch
+        .entry
+        .as_deref()
+        .map(|entry| Path::new(entry).with_file_name("cli.mjs"))
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    let Some(bundle) = bundle else {
+        checks.push(Check {
+            name: "CLI 번들".into(),
+            ok: false,
+            detail: "dist/cli.mjs를 읽지 못했습니다.".into(),
+        });
+        return checks;
+    };
+    let needs = [
+        ("계정 전환 (COMMAND_CODE_API_KEY)", "getCommandApiKeyFromEnv", "환경변수 키 우선 사용"),
+        ("ACP 서버 (cmd acp)", "session/request_permission", "채팅·권한 요청"),
+        ("세션 목록·불러오기", "session/load", "지난 대화 이어 하기"),
+        ("모델 최소 요금제 (minimumPlan)", "minimumPlan", "모델 사용 가능 여부"),
+        ("요금·크레딧 API", "/alpha/billing/credits", "사용량 게이지"),
+        ("사용 한도 창 (windowLimits)", "windowLimits", "5시간·주간 한도 게이지"),
+    ];
+    for (name, marker, purpose) in needs {
+        let ok = bundle.contains(marker);
+        checks.push(Check {
+            name: name.into(),
+            ok,
+            detail: if ok {
+                purpose.into()
+            } else {
+                format!("CLI에서 `{marker}`를 찾지 못했습니다 — {purpose} 기능이 바뀌었을 수 있습니다.")
+            },
+        });
+    }
+    checks
 }
 
 #[derive(Serialize)]

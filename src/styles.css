@@ -2039,3 +2039,163 @@ dialog:has(.models) {
 	white-space: pre-wrap;
 	word-break: break-all;
 }
+
+/* ------------------------------------------------------------ usage gauge */
+
+.tab-spacer {
+	flex: 1;
+}
+.usage-gauge {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	flex: none;
+	margin: 0 4px 4px 8px;
+	padding: 4px 10px;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	background: var(--bg-elev);
+	cursor: pointer;
+	font-size: 12px;
+	white-space: nowrap;
+}
+.usage-gauge:hover {
+	border-color: var(--border-strong);
+}
+.usage-gauge.warn {
+	border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
+}
+.usage-gauge.danger {
+	border-color: color-mix(in srgb, var(--danger) 60%, var(--border));
+	color: var(--danger);
+}
+.usage-gauge .gauge-bar {
+	width: 64px;
+}
+.gauge-bar {
+	display: block;
+	height: 6px;
+	border-radius: 3px;
+	background: var(--border);
+	overflow: hidden;
+}
+.gauge-bar > span {
+	display: block;
+	height: 100%;
+	border-radius: 3px;
+	background: var(--ok);
+	transition: width 0.4s;
+}
+.gauge-bar.warn > span {
+	background: var(--warn);
+}
+.gauge-bar.danger > span {
+	background: var(--danger);
+}
+.gauge-text {
+	font-variant-numeric: tabular-nums;
+}
+
+.gauge-panel {
+	position: fixed;
+	z-index: 45;
+	width: 320px;
+	display: grid;
+	gap: 12px;
+	padding: 14px;
+	border: 1px solid var(--border-strong);
+	border-radius: 12px;
+	background: var(--bg-elev);
+	box-shadow: var(--shadow);
+}
+.gauge-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: baseline;
+}
+.gauge-row {
+	display: grid;
+	gap: 5px;
+}
+.gauge-row-head {
+	display: flex;
+	justify-content: space-between;
+	font-size: 12.5px;
+}
+.gauge-row .gauge-bar {
+	height: 8px;
+}
+.gauge-alert {
+	padding: 8px 10px;
+	border-radius: 8px;
+	background: var(--danger-soft);
+	color: var(--fg);
+	font-size: 12px;
+	line-height: 1.5;
+}
+.gauge-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+.gauge-actions .btn {
+	padding: 4px 9px;
+	font-size: 12px;
+}
+.gauge-actions svg {
+	width: 13px;
+	height: 13px;
+}
+
+/* ------------------------------------------------- toasts with an action */
+
+.toast.has-action {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	pointer-events: auto;
+}
+.toast-action {
+	padding: 3px 10px;
+	font-size: 12px;
+	flex: none;
+}
+
+/* ------------------------------------------------------ compatibility */
+
+.update-dot.warn {
+	color: var(--warn);
+}
+.compat-list {
+	display: grid;
+	gap: 2px;
+}
+.compat-row {
+	display: grid;
+	grid-template-columns: 18px 190px 1fr;
+	gap: 8px;
+	padding: 3px 6px;
+	border-radius: 6px;
+	font-size: 12px;
+}
+.compat-mark {
+	color: var(--ok);
+	font-weight: 700;
+}
+.compat-row.bad {
+	background: var(--danger-soft);
+}
+.compat-row.bad .compat-mark {
+	color: var(--danger);
+}
+.compat-detail {
+	color: var(--fg-dim);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+dialog {
+	max-height: 92vh;
+	overflow-y: auto;
+}

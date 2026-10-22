@@ -44,6 +44,8 @@ export interface ChatHost {
 	access(accountId: string | null): { billing: Billing | null; catalog: Catalog | null };
 	/** Open the account menu (to switch away from an account that cannot run). */
 	openAccounts(): void;
+	/** A turn hit a usage window (5-hour, weekly); the usage gauge shows it. */
+	reportLimit(accountId: string | null, window: string, resetAt: number | null): void;
 }
 
 interface ChatOptions {
@@ -185,6 +187,8 @@ export class ChatView {
 	private suppressReplay = false;
 	/** An account change arrived mid-turn; rebind once the turn ends. */
 	private rebindPending = false;
+	/** Note shown when the pending rebind happens (default: the account). */
+	private rebindReason: string | null = null;
 	/** The banner currently shows an account/model access warning. */
 	private accessBanner = false;
 	/** Bumped by every open(); an older open() that sees a newer value stops. */
@@ -423,6 +427,11 @@ export class ChatView {
 		return this.options.accountId;
 	}
 
+	/** The ACP protocol version the agent agreed to (for the compatibility check). */
+	get protocolVersion(): number | undefined {
+		return this.connection.info?.protocolVersion;
+	}
+
 	private renderAccountChip(): void {
 		this.accountChip.replaceChildren(svg(icons.user), this.options.accountName);
 	}
@@ -433,12 +442,13 @@ export class ChatView {
 	 * history stays. `force` reconnects even for the same account (its login
 	 * changed underneath, e.g. a CLI re-login). A running turn finishes first.
 	 */
-	setAccount(accountId: string | null, accountName: string, force = false): void {
+	setAccount(accountId: string | null, accountName: string, force = false, reason?: string): void {
 		const changed = accountId !== this.options.accountId;
 		this.options.accountName = accountName;
 		this.renderAccountChip();
 		if (!changed && !force) return;
 		this.options.accountId = accountId;
+		this.rebindReason = reason ?? null;
 		if (this.busy) {
 			this.rebindPending = true;
 			this.setStatus(`이번 작업이 끝나면 ${accountName} 계정으로 다시 연결합니다.`, true);
@@ -464,7 +474,8 @@ export class ChatView {
 		// History already on screen stays; an empty chat just starts over.
 		if (this.sessionId && this.hasContent) this.options.sessionId = this.sessionId;
 		else this.sessionId = null;
-		this.appendNote(`${this.options.accountName} 계정으로 다시 연결했습니다.`);
+		this.appendNote(this.rebindReason ?? `${this.options.accountName} 계정으로 다시 연결했습니다.`);
+		this.rebindReason = null;
 		await this.open();
 	}
 
@@ -1285,6 +1296,8 @@ export class ChatView {
 			this.closeSegments();
 			// A crash already put up the banner with "다시 연결"; keep it.
 			if (this.connection.alive) this.showError(error);
+			const limit = explainError(error).limit;
+			if (limit) this.host.reportLimit(this.options.accountId, limit.window, limit.resetAt);
 			this.host.attention("error", describeError(error));
 		} finally {
 			this.finishTurnUi();
@@ -1486,7 +1499,12 @@ export function describeError(error: unknown): string {
 }
 
 /** Turn agent errors into something a person can act on. */
-function explainError(error: unknown): { text: string; login: boolean; credits?: boolean } {
+function explainError(error: unknown): {
+	text: string;
+	login: boolean;
+	credits?: boolean;
+	limit?: { window: string; resetAt: number | null };
+} {
 	const message = error instanceof Error ? error.message : String(error);
 	if (/insufficient credits|purchase more credits/i.test(message)) {
 		return {
@@ -1509,9 +1527,11 @@ function explainError(error: unknown): { text: string; login: boolean; credits?:
 		const when = reset
 			? new Date(reset[1]).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })
 			: null;
+		const window = /weekly/i.test(message) ? "주간" : /daily/i.test(message) ? "일간" : "5시간";
 		return {
-			text: `사용 한도에 도달했습니다.${when ? ` ${when}에 초기화됩니다.` : ""} 다른 모델로 바꾸거나 잠시 후 다시 시도하세요.`,
+			text: `${window} 사용 한도에 도달했습니다.${when ? ` ${when}에 초기화됩니다.` : ""} 다른 계정이나 모델로 바꾸거나 잠시 후 다시 시도하세요.`,
 			login: false,
+			limit: { window, resetAt: reset ? Date.parse(reset[1]) : null },
 		};
 	}
 	return { text: message, login: false };

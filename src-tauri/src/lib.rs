@@ -35,6 +35,7 @@ pub fn run() {
         .manage(accounts::PendingLogins::default())
         .setup(|app| {
             accounts::start(app.handle());
+            updates::start_version_watch(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -49,6 +50,7 @@ pub fn run() {
             updates::app_update_build,
             updates::app_update_apply,
             updates::cli_update,
+            updates::cli_compat,
             launch::cmdc_launch,
             launch::start_dir,
             launch::dir_exists,

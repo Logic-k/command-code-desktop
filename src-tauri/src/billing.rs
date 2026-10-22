@@ -30,6 +30,11 @@ pub struct Billing {
     pub monthly_credits: f64,
     pub purchased_credits: f64,
     pub free_credits: f64,
+    /// When the current billing period ends (ISO 8601), for "renews in N days".
+    pub period_end: Option<String>,
+    /// Rolling-window limits (`{limited, fiveHour: {used, cap, resetAt}, weekly}`)
+    /// as the API sends them; present only while a plan has window limits.
+    pub window_limits: Option<Value>,
 }
 
 fn get(agent: &ureq::Agent, key: &str, route: &str) -> Result<Value, String> {
@@ -90,6 +95,11 @@ pub async fn account_billing(account_id: Option<String>) -> Result<Billing, Stri
             .filter(|_| status.as_deref().is_some_and(|s| ACTIVE.contains(&s)))
             .map(str::to_string);
 
+        let period_end = subs
+            .pointer("/data/currentPeriodEnd")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let window_limits = credits.get("windowLimits").filter(|v| !v.is_null()).cloned();
         Ok(Billing {
             user_name,
             plan_id,
@@ -97,6 +107,8 @@ pub async fn account_billing(account_id: Option<String>) -> Result<Billing, Stri
             monthly_credits: number(&credits, "monthlyCredits"),
             purchased_credits: number(&credits, "purchasedCredits"),
             free_credits: number(&credits, "freeCredits"),
+            period_end,
+            window_limits,
         })
     })
     .await

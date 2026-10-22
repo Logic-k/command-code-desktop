@@ -22,6 +22,7 @@ import {
 	planName,
 	money,
 	balance,
+	usageOf,
 } from "./billing";
 import type { Launch, SessionInfo } from "./acp/types";
 import {
@@ -407,6 +408,7 @@ async function openChat(cwd: string, session?: SessionInfo, initialPrompt?: stri
 			openTerminal: (dir, args) => void openTerminal(dir, args),
 			login: (accountId) => void (accountId ? addAccount() : cliLogin()),
 			access: (accountId) => accessFor(accountId),
+			reportLimit: (accountId, window, resetAt) => reportLimit(accountId, window, resetAt),
 			openAccounts: () => setTimeout(() => toggleAccountMenu(true), 0),
 		},
 		{
@@ -568,13 +570,34 @@ const loginTabs = new Map<string, Tab>();
 /** The tab running `cmd login` for the CLI's own login, if any. */
 let cliLoginTab: Tab | null = null;
 
-function toast(text: string, tone: "info" | "ok" | "error" = "info", ms = 4500): void {
-	const el = h("div", { class: `toast toast-${tone}` }, text);
-	toastBox.appendChild(el);
-	setTimeout(() => {
+function toast(
+	text: string,
+	tone: "info" | "ok" | "error" = "info",
+	ms = 4500,
+	action?: { label: string; run: () => void },
+): void {
+	const el = h("div", { class: `toast toast-${tone}${action ? " has-action" : ""}` }, h("span", null, text));
+	const dismiss = () => {
 		el.classList.add("leaving");
 		setTimeout(() => el.remove(), 300);
-	}, ms);
+	};
+	if (action) {
+		el.appendChild(
+			h(
+				"button",
+				{
+					class: "btn toast-action",
+					onclick: () => {
+						dismiss();
+						action.run();
+					},
+				},
+				action.label,
+			),
+		);
+	}
+	toastBox.appendChild(el);
+	setTimeout(dismiss, ms);
 }
 
 /** The saved account new chats use, or null for the CLI's own login. */
@@ -619,6 +642,7 @@ async function loadBilling(accountId: string | null, { maxAgeMs = 60_000 } = {})
 		billingCache.set(key, { at: Date.now(), billing: cached?.billing ?? null, error: String(error) });
 	}
 	renderAccountSwitch();
+	renderGauge();
 	if (!accountMenu.classList.contains("hidden")) toggleAccountMenu(true);
 	for (const tab of tabs) {
 		if (tab.view instanceof ChatView && (tab.view.accountId ?? "") === key) tab.view.refreshAccess();
@@ -787,6 +811,7 @@ async function switchAccount(id: string | null): Promise<void> {
 	sessionCache.clear();
 	renderProjects();
 	const moved = applyAccountToTabs(activeAccountId());
+	renderGauge();
 	void loadBilling(activeAccountId());
 	if (previous !== activeAccountId()) {
 		const name = accountName(activeAccountId());
@@ -1015,11 +1040,201 @@ async function openModelsDialog(accountId: string | null = activeAccountId()): P
 	if (!settingsEl.open) settingsEl.showModal();
 }
 
+// ---------------------------------------------------------- usage gauge
+//
+// Always on screen (tab bar, top right), for the account new chats run as:
+// share of the month's credits spent, what is left, days to renewal, and the
+// 5-hour / weekly windows when the plan has them or a limit was just hit.
+// Same numbers as the CLI's /usage (src/billing.ts `usageOf`).
+
+const gaugeEl = byId<HTMLButtonElement>("usage-gauge");
+const gaugePanel = h("div", { class: "gauge-panel hidden" });
+document.body.appendChild(gaugePanel);
+
+/** Limits a turn ran into, per account, until they reset. */
+const limitHits = new Map<string, { window: string; resetAt: number | null; at: number }>();
+
+function reportLimit(accountId: string | null, window: string, resetAt: number | null): void {
+	limitHits.set(accountId ?? "", { window, resetAt, at: Date.now() });
+	renderGauge();
+	void loadBilling(accountId, { maxAgeMs: 0 });
+}
+
+function activeLimit(accountId: string | null): { window: string; resetAt: number | null } | null {
+	const hit = limitHits.get(accountId ?? "");
+	if (!hit) return null;
+	const expired = hit.resetAt !== null ? Date.now() >= hit.resetAt : Date.now() - hit.at > 60 * 60_000;
+	if (expired) {
+		limitHits.delete(accountId ?? "");
+		return null;
+	}
+	return hit;
+}
+
+/** "오후 04:47", or "10월 25일 오후 04:07" when it is not within the next day. */
+function clock(ms: number): string {
+	const time = new Date(ms).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+	if (ms - Date.now() < 20 * 3_600_000) return time;
+	return `${new Date(ms).toLocaleDateString("ko-KR", { month: "long", day: "numeric" })} ${time}`;
+}
+
+function level(percent: number | null, blocked: boolean): "ok" | "warn" | "danger" {
+	if (blocked) return "danger";
+	if (percent === null) return "ok";
+	return percent >= 95 ? "danger" : percent >= 80 ? "warn" : "ok";
+}
+
+function bar(percent: number, tone: string): HTMLElement {
+	return h("span", { class: `gauge-bar ${tone}` }, h("span", { style: `width:${Math.max(2, percent).toFixed(1)}%` }));
+}
+
+function renderGauge(): void {
+	const id = activeAccountId();
+	const entry = billingCache.get(id ?? "");
+	const billing = entry?.billing ?? null;
+	const hit = activeLimit(id);
+	if (!cliUser && !id) {
+		gaugeEl.className = "usage-gauge danger";
+		gaugeEl.replaceChildren(h("span", { class: "gauge-text" }, "로그인 필요"));
+		gaugeEl.title = "로그인되어 있지 않습니다";
+		return;
+	}
+	if (!billing) {
+		gaugeEl.className = "usage-gauge";
+		gaugeEl.replaceChildren(h("span", { class: "gauge-text muted" }, entry?.error ? "사용량 확인 실패" : "사용량 확인 중…"));
+		gaugeEl.title = entry?.error ?? "";
+		return;
+	}
+	const usage = usageOf(billing);
+	const worstWindow = usage.windows.reduce<number | null>((max, w) => (max === null || w.percent > max ? w.percent : max), null);
+	const blocked = Boolean(hit) || usage.remaining <= 0;
+	const shown = Math.max(usage.percent ?? 0, worstWindow ?? 0);
+	const tone = level(usage.percent === null && worstWindow === null ? null : shown, blocked);
+	gaugeEl.className = `usage-gauge ${tone}`;
+	const parts: (HTMLElement | string)[] = [];
+	if (usage.percent !== null || worstWindow !== null) parts.push(bar(blocked ? 100 : shown, tone));
+	parts.push(
+		h(
+			"span",
+			{ class: "gauge-text" },
+			hit
+				? `${hit.window} 한도${hit.resetAt ? ` · ${clock(hit.resetAt)} 초기화` : ""}`
+				: usage.percent !== null
+					? `${Math.round(shown)}% · ${money(usage.remaining)}`
+					: `잔액 ${money(usage.remaining)}`,
+		),
+	);
+	gaugeEl.replaceChildren(...parts);
+	gaugeEl.title = `${accountName(id)} · ${billingSummary(billing)} · 눌러서 자세히`;
+	if (!gaugePanel.classList.contains("hidden")) renderGaugePanel();
+}
+
+function renderGaugePanel(): void {
+	const id = activeAccountId();
+	const entry = billingCache.get(id ?? "");
+	const billing = entry?.billing ?? null;
+	const hit = activeLimit(id);
+	const rows: HTMLElement[] = [h("div", { class: "gauge-head" }, h("strong", null, accountName(id)), h("span", { class: "muted" }, billing ? planName(billing.planId) : ""))];
+	if (!billing) {
+		rows.push(h("div", { class: "muted small" }, entry?.error ?? "사용량을 불러오는 중입니다."));
+	} else {
+		const usage = usageOf(billing);
+		if (usage.percent !== null && usage.pool !== null) {
+			const tone = level(usage.percent, usage.remaining <= 0);
+			rows.push(
+				h(
+					"div",
+					{ class: "gauge-row" },
+					h("div", { class: "gauge-row-head" }, h("span", null, "이번 달 크레딧"), h("span", null, `${Math.round(usage.percent)}% 사용`)),
+					bar(usage.percent, tone),
+					h(
+						"div",
+						{ class: "muted small" },
+						`남은 ${money(usage.remaining)} / ${money(usage.pool)}${usage.daysLeft !== null ? ` · ${usage.daysLeft}일 뒤 갱신` : ""}`,
+					),
+				),
+			);
+		} else {
+			rows.push(h("div", { class: "gauge-row" }, h("div", { class: "gauge-row-head" }, h("span", null, "잔액"), h("span", null, money(usage.remaining)))));
+		}
+		for (const w of usage.windows) {
+			rows.push(
+				h(
+					"div",
+					{ class: "gauge-row" },
+					h("div", { class: "gauge-row-head" }, h("span", null, `${w.label} 한도`), h("span", null, `${Math.round(w.percent)}%`)),
+					bar(w.percent, level(w.percent, false)),
+					h("div", { class: "muted small" }, `${money(w.used)} / ${money(w.cap)}${w.resetAt ? ` · ${clock(w.resetAt)} 초기화` : ""}`),
+				),
+			);
+		}
+		if (hit) {
+			rows.push(
+				h(
+					"div",
+					{ class: "gauge-alert" },
+					`${hit.window} 사용 한도에 도달했습니다.${hit.resetAt ? ` ${clock(hit.resetAt)}에 초기화됩니다.` : ""} 다른 계정이나 모델로 바꾸면 계속할 수 있습니다.`,
+				),
+			);
+		}
+		if (billing.purchasedCredits > 0 || billing.freeCredits > 0) {
+			rows.push(h("div", { class: "muted small" }, `충전 ${money(billing.purchasedCredits)} · 보너스 ${money(billing.freeCredits)} 포함`));
+		}
+		const blocker = accountBlocker(billing);
+		if (blocker) rows.push(h("div", { class: "gauge-alert" }, blocker));
+		rows.push(
+			h(
+				"div",
+				{ class: "muted small" },
+				`${entry ? `${Math.max(0, Math.round((Date.now() - entry.at) / 1000))}초 전 확인` : ""} · 1분마다, 그리고 답변이 끝날 때마다 갱신`,
+			),
+		);
+	}
+	rows.push(
+		h(
+			"div",
+			{ class: "gauge-actions" },
+			h("button", { class: "btn", onclick: () => void loadBilling(id, { maxAgeMs: 0 }) }, svg(icons.refresh), "새로고침"),
+			h("button", { class: "btn", onclick: () => void openModelsDialog(id) }, "사용 가능한 모델"),
+			h("button", { class: "btn", onclick: () => { toggleGauge(false); toggleAccountMenu(true); } }, "계정 전환"),
+		),
+	);
+	gaugePanel.replaceChildren(...rows);
+	const rect = gaugeEl.getBoundingClientRect();
+	gaugePanel.style.top = `${rect.bottom + 6}px`;
+	gaugePanel.style.right = `${Math.max(8, window.innerWidth - rect.right)}px`;
+}
+
+function toggleGauge(force?: boolean): void {
+	const open = force ?? gaugePanel.classList.contains("hidden");
+	gaugePanel.classList.toggle("hidden", !open);
+	if (open) {
+		renderGaugePanel();
+		void loadBilling(activeAccountId(), { maxAgeMs: 15_000 });
+	}
+}
+
+gaugeEl.addEventListener("click", (event) => {
+	event.stopPropagation();
+	toggleGauge();
+});
+document.addEventListener("click", (event) => {
+	if (!gaugePanel.contains(event.target as Node)) toggleGauge(false);
+});
+
+// Keep it current: every minute while the window is visible.
+setInterval(() => {
+	if (document.visibilityState === "visible") void loadBilling(activeAccountId(), { maxAgeMs: 55_000 });
+	else renderGauge();
+}, 60_000);
+
 // -------------------------------------------------------------- updates
 //
-// CLI: `cmd update` (the CLI also updates itself in the background; new
-// agents pick up a new version on their own). App: rebuilt from the source
-// folder it was built from, then swapped in on restart (src-tauri/src/updates.rs).
+// CLI: `cmd update` (the CLI also updates itself in the background; the
+// version watcher below moves running chats onto a new version). App: rebuilt
+// from the source folder it was built from, then swapped in on restart
+// (src-tauri/src/updates.rs). Update state lives here, not in the dialog, so
+// closing the dialog never loses a build in progress.
 
 interface AppInfo {
 	version: string;
@@ -1031,19 +1246,45 @@ interface AppInfo {
 	changes: string[];
 }
 
+interface Check {
+	name: string;
+	ok: boolean;
+	detail: string;
+}
+
 let appInfo: AppInfo | null = null;
 let cliLatest: string | null = null;
 let cliCurrent: string | null = null;
+let compat: Check[] = [];
+const appUpdate: { phase: "idle" | "building" | "ready" | "failed"; log: string[]; exe: string | null; error: string | null } = {
+	phase: "idle",
+	log: [],
+	exe: null,
+	error: null,
+};
+/** Re-renders the update dialog while it is open. */
+let renderUpdatesDialog: (() => void) | null = null;
 
 function renderVersionLabel(): void {
 	const label = byId("cli-version");
-	const appBehind = (appInfo?.commitsBehind ?? 0) > 0;
+	const appBehind = (appInfo?.commitsBehind ?? 0) > 0 && !appInfo?.debug;
 	const cliBehind = Boolean(cliLatest && cliCurrent && cliLatest !== cliCurrent);
+	const broken = compat.some((c) => !c.ok);
 	label.replaceChildren(
 		`앱 ${appInfo?.version ?? ""} · CLI ${cliCurrent ?? "?"}`,
-		...(appBehind || cliBehind ? [h("span", { class: "update-dot" }, " 업데이트 있음")] : []),
+		...(appUpdate.phase === "ready"
+			? [h("span", { class: "update-dot" }, " 적용 대기")]
+			: appBehind || cliBehind
+				? [h("span", { class: "update-dot" }, " 업데이트 있음")]
+				: []),
+		...(broken ? [h("span", { class: "update-dot warn" }, " 호환성 확인 필요")] : []),
 	);
-	label.title = "업데이트 확인";
+	label.title = "업데이트 · 호환성";
+}
+
+function parseLatest(output: string, fallback: string | null): string | null {
+	const latest = output.match(/Latest:\s*v?([\d.]+)/i)?.[1];
+	return /update available/i.test(output) && latest ? latest : fallback;
 }
 
 async function checkUpdates(cli: boolean): Promise<void> {
@@ -1052,124 +1293,187 @@ async function checkUpdates(cli: boolean): Promise<void> {
 	cliCurrent = launch?.version ?? null;
 	if (cli) {
 		const result = await invoke<{ output: string; version: string | null }>("cli_update", { checkOnly: true }).catch(() => null);
-		if (result) {
-			const latest = result.output.match(/Latest:\s*v?([\d.]+)/i)?.[1];
-			cliLatest = /update available/i.test(result.output) && latest ? latest : (result.version ?? cliCurrent);
-		}
+		if (result) cliLatest = parseLatest(result.output, result.version ?? cliCurrent);
 	}
+	renderVersionLabel();
+	renderUpdatesDialog?.();
+}
+
+/** What the app relies on in the CLI: static markers in its bundle (Rust)
+ * plus the live data the app already has (catalog, billing, ACP). */
+async function runCompat(): Promise<Check[]> {
+	const checks = await invoke<Check[]>("cli_compat").catch((error): Check[] => [{ name: "CLI 점검", ok: false, detail: String(error) }]);
+	await loadCatalog();
+	const withPlans = catalog?.data.filter((m) => m.minimumPlan !== undefined).length ?? 0;
+	checks.push({
+		name: "모델 목록",
+		ok: Boolean(catalog && withPlans > 0),
+		detail: catalog ? `모델 ${catalog.data.length}개 · 최소 요금제 표시 ${withPlans}개` : "CLI의 모델 목록 캐시를 읽지 못했습니다.",
+	});
+	const entry = billingCache.get(activeAccountId() ?? "");
+	checks.push({
+		name: "요금·사용량 API",
+		ok: Boolean(entry?.billing),
+		detail: entry?.billing ? billingSummary(entry.billing) : (entry?.error ?? "아직 확인 전"),
+	});
+	const live = tabs
+		.map((t) => t.view)
+		.find((v): v is ChatView => v instanceof ChatView && v.ready)?.protocolVersion;
+	checks.push({
+		name: "ACP 프로토콜",
+		ok: live === undefined || live === 1,
+		detail: live === undefined ? "열린 대화가 없어 다음 대화 때 확인" : `버전 ${live}${live === 1 ? "" : " — 앱은 1을 기대합니다"}`,
+	});
+	compat = checks;
+	renderVersionLabel();
+	renderUpdatesDialog?.();
+	return checks;
+}
+
+async function startAppUpdate(): Promise<void> {
+	if (appUpdate.phase === "building") return;
+	appUpdate.phase = "building";
+	appUpdate.log = [];
+	appUpdate.error = null;
+	renderUpdatesDialog?.();
+	renderVersionLabel();
+	const channel = new Channel<string>();
+	channel.onmessage = (line) => {
+		appUpdate.log.push(line);
+		if (appUpdate.log.length > 400) appUpdate.log.splice(0, appUpdate.log.length - 400);
+		renderUpdatesDialog?.();
+	};
+	try {
+		appUpdate.exe = await invoke<string>("app_update_build", { onLog: channel });
+		appUpdate.phase = "ready";
+		toast("앱 새 버전이 준비됐습니다.", "ok", 30_000, { label: "다시 시작해서 적용", run: () => void applyAppUpdate() });
+	} catch (error) {
+		appUpdate.phase = "failed";
+		appUpdate.error = String(error);
+		toast(`앱 업데이트 빌드 실패: ${appUpdate.error}`, "error", 10_000, { label: "자세히", run: () => void openUpdates() });
+	}
+	renderUpdatesDialog?.();
 	renderVersionLabel();
 }
 
-async function openUpdates(): Promise<void> {
-	const log = h("pre", { class: "update-log hidden" });
-	const appStatus = h("div", { class: "update-status" });
-	const cliStatus = h("div", { class: "update-status" });
-	const appBtn = h("button", { class: "btn primary", type: "button" }, "앱 업데이트");
-	const cliBtn = h("button", { class: "btn", type: "button" }, "CLI 업데이트 확인");
+async function applyAppUpdate(): Promise<void> {
+	if (appUpdate.phase !== "ready" || !appUpdate.exe) return;
+	const busy = tabs.filter((t) => t.busy).length;
+	if (busy) {
+		const ok = await ask(`작업 중인 탭 ${busy}개가 중지됩니다. 지금 다시 시작할까요?`, {
+			title: "업데이트 적용",
+			kind: "warning",
+			okLabel: "다시 시작",
+			cancelLabel: "나중에",
+		});
+		if (!ok) return;
+	}
+	pool.stopAll();
+	await invoke("app_update_apply", { newExe: appUpdate.exe });
+}
 
-	const renderApp = () => {
-		if (!appInfo) {
-			appStatus.textContent = "앱 정보를 읽지 못했습니다.";
-			appBtn.disabled = true;
-			return;
+async function updateCli(): Promise<void> {
+	const install = Boolean(cliLatest && cliCurrent && cliLatest !== cliCurrent);
+	try {
+		const result = await invoke<{ output: string; version: string | null }>("cli_update", { checkOnly: !install });
+		if (install) {
+			// The version watcher reports the change and moves chats over.
+			cliLatest = result.version;
+		} else {
+			cliLatest = parseLatest(result.output, result.version ?? cliCurrent);
 		}
-		const behind = appInfo.commitsBehind ?? 0;
-		appStatus.replaceChildren(
-			h("div", null, h("strong", null, `Command Code Desktop ${appInfo.version}`), ` (${appInfo.commit.slice(0, 7) || "커밋 정보 없음"})`),
-			h("div", { class: "muted small" }, `소스 폴더: ${appInfo.sourceDir ?? "찾지 못함"}`),
-			appInfo.debug
-				? h("div", { class: "muted small" }, "개발 모드로 실행 중이라 소스를 고치면 바로 반영됩니다.")
-				: behind > 0
-					? h(
-							"div",
-							null,
-							h("div", { class: "update-new" }, `새 버전이 있습니다 · 변경 ${behind}개`),
-							h("ul", { class: "update-changes" }, appInfo.changes.map((c) => h("li", null, c))),
-						)
-					: h("div", { class: "muted small" }, "최신 버전입니다."),
-		);
-		appBtn.disabled = appInfo.debug || behind === 0 || !appInfo.sourceDir;
-	};
-	const renderCli = () => {
-		const behind = cliLatest && cliCurrent && cliLatest !== cliCurrent;
+	} catch (error) {
+		toast(String(error), "error");
+	}
+	await checkUpdates(false);
+}
+
+function openUpdates(): void {
+	const appStatus = h("div", { class: "update-status" });
+	const appBtn = h("button", { class: "btn primary", type: "button" });
+	const log = h("pre", { class: "update-log hidden" });
+	const cliStatus = h("div", { class: "update-status" });
+	const cliBtn = h("button", { class: "btn", type: "button" });
+	const compatList = h("div", { class: "compat-list" });
+	const compatBtn = h("button", { class: "btn", type: "button" }, "다시 점검");
+	let cliBusy = false;
+
+	const render = () => {
+		if (!appInfo) {
+			appStatus.textContent = "앱 정보를 읽는 중…";
+		} else {
+			const behind = appInfo.commitsBehind ?? 0;
+			appStatus.replaceChildren(
+				h("div", null, h("strong", null, `Command Code Desktop ${appInfo.version}`), ` (${appInfo.commit.slice(0, 7) || "커밋 정보 없음"})`),
+				h("div", { class: "muted small" }, `소스 폴더: ${appInfo.sourceDir ?? "찾지 못함"}`),
+				appInfo.debug
+					? h("div", { class: "muted small" }, "개발 모드로 실행 중이라 소스를 고치면 바로 반영됩니다.")
+					: behind > 0
+						? h(
+								"div",
+								null,
+								h("div", { class: "update-new" }, `새 버전이 있습니다 · 변경 ${behind}개`),
+								h("ul", { class: "update-changes" }, appInfo.changes.map((c) => h("li", null, c))),
+							)
+						: h("div", { class: "muted small" }, "최신 버전입니다."),
+			);
+		}
+		const phase = appUpdate.phase;
+		appBtn.textContent =
+			phase === "building" ? "빌드 중… (몇 분 걸립니다)" : phase === "ready" ? "다시 시작해서 적용" : phase === "failed" ? "다시 시도" : "앱 업데이트";
+		appBtn.disabled =
+			phase === "building" ||
+			(phase === "idle" && (!appInfo || appInfo.debug || (appInfo.commitsBehind ?? 0) === 0 || !appInfo.sourceDir));
+		log.classList.toggle("hidden", appUpdate.log.length === 0 && !appUpdate.error);
+		log.textContent = [...appUpdate.log.slice(-200), ...(appUpdate.error ? [`[실패] ${appUpdate.error}`] : [])].join("\n");
+		log.scrollTop = log.scrollHeight;
+
+		const cliBehind = Boolean(cliLatest && cliCurrent && cliLatest !== cliCurrent);
 		cliStatus.replaceChildren(
 			h("div", null, h("strong", null, `Command Code CLI ${cliCurrent ?? "?"}`)),
 			h(
 				"div",
-				{ class: behind ? "update-new" : "muted small" },
-				behind ? `새 버전 ${cliLatest}이(가) 있습니다.` : cliLatest ? "최신 버전입니다." : "확인 전입니다.",
+				{ class: cliBehind ? "update-new" : "muted small" },
+				cliBehind ? `새 버전 ${cliLatest}이(가) 있습니다.` : cliLatest ? "최신 버전입니다." : "확인 전입니다.",
 			),
-			h("div", { class: "muted small" }, "CLI는 스스로도 백그라운드에서 업데이트합니다. 새로 여는 대화부터 새 버전을 씁니다."),
+			h("div", { class: "muted small" }, "CLI는 스스로도 백그라운드에서 업데이트합니다. 버전이 바뀌면 앱이 알아채고, 열린 대화를 새 버전으로 다시 연결합니다."),
 		);
-		cliBtn.textContent = behind ? "CLI 지금 업데이트" : "CLI 업데이트 확인";
+		cliBtn.textContent = cliBusy ? "진행 중…" : cliBehind ? "CLI 지금 업데이트" : "CLI 업데이트 확인";
+		cliBtn.disabled = cliBusy;
+
+		compatList.replaceChildren(
+			...(compat.length
+				? compat.map((c) =>
+						h(
+							"div",
+							{ class: `compat-row${c.ok ? "" : " bad"}` },
+							h("span", { class: "compat-mark" }, c.ok ? "✓" : "!"),
+							h("span", { class: "compat-name" }, c.name),
+							h("span", { class: "compat-detail" }, c.detail),
+						),
+					)
+				: [h("div", { class: "muted small" }, "점검 중…")]),
+		);
 	};
 
+	appBtn.addEventListener("click", () => {
+		if (appUpdate.phase === "ready") void applyAppUpdate();
+		else void startAppUpdate();
+	});
 	cliBtn.addEventListener("click", async () => {
-		const install = Boolean(cliLatest && cliCurrent && cliLatest !== cliCurrent);
-		cliBtn.disabled = true;
-		cliBtn.textContent = install ? "업데이트 중…" : "확인 중…";
-		try {
-			const result = await invoke<{ output: string; version: string | null }>("cli_update", { checkOnly: !install });
-			if (install) {
-				cliCurrent = result.version;
-				cliLatest = result.version;
-				// Agents already running keep the old version; new ones get the new one.
-				pool.stopAll();
-				toast(`CLI를 ${result.version ?? ""}(으)로 업데이트했습니다. 열린 대화는 다시 연결하면 새 버전을 씁니다.`, "ok");
-			} else {
-				await checkUpdates(false);
-				const latest = result.output.match(/Latest:\s*v?([\d.]+)/i)?.[1];
-				cliLatest = /update available/i.test(result.output) && latest ? latest : (result.version ?? cliCurrent);
-			}
-		} catch (error) {
-			toast(String(error), "error");
-		}
-		cliBtn.disabled = false;
-		renderCli();
-		renderVersionLabel();
+		cliBusy = true;
+		render();
+		await updateCli();
+		cliBusy = false;
+		render();
 	});
-
-	appBtn.addEventListener("click", async () => {
-		appBtn.disabled = true;
-		appBtn.textContent = "빌드 중… (몇 분 걸립니다)";
-		log.classList.remove("hidden");
-		log.textContent = "";
-		const channel = new Channel<string>();
-		channel.onmessage = (line) => {
-			log.textContent += `${line}\n`;
-			log.scrollTop = log.scrollHeight;
-		};
-		try {
-			const exe = await invoke<string>("app_update_build", { onLog: channel });
-			appBtn.textContent = "다시 시작해서 적용";
-			appBtn.disabled = false;
-			appBtn.onclick = async () => {
-				const busy = tabs.filter((t) => t.busy).length;
-				if (busy) {
-					const ok = await ask(`작업 중인 탭 ${busy}개가 중지됩니다. 지금 다시 시작할까요?`, {
-						title: "업데이트 적용",
-						kind: "warning",
-						okLabel: "다시 시작",
-						cancelLabel: "나중에",
-					});
-					if (!ok) return;
-				}
-				pool.stopAll();
-				await invoke("app_update_apply", { newExe: exe });
-			};
-			toast("새 버전 빌드가 끝났습니다. '다시 시작해서 적용'을 누르세요.", "ok", 8000);
-		} catch (error) {
-			appBtn.textContent = "다시 시도";
-			appBtn.disabled = false;
-			toast(`앱 업데이트 실패: ${String(error)}`, "error", 8000);
-		}
-	});
+	compatBtn.addEventListener("click", () => void runCompat());
 
 	settingsEl.replaceChildren(
 		h(
 			"div",
 			{ class: "settings" },
-			h("h2", null, "업데이트"),
+			h("h2", null, "업데이트 · 호환성"),
 			h("section", { class: "update-block" }, h("h3", null, "앱"), appStatus, h("div", { class: "row" }, appBtn)),
 			log,
 			h(
@@ -1185,19 +1489,58 @@ async function openUpdates(): Promise<void> {
 				),
 			),
 			h(
+				"section",
+				{ class: "update-block" },
+				h("h3", null, "CLI 호환성 점검"),
+				h("div", { class: "muted small" }, "이 앱이 CLI에서 기대는 기능들입니다. CLI가 바뀐 뒤 하나라도 빠지면 여기에 표시됩니다."),
+				compatList,
+				h("div", { class: "row" }, compatBtn),
+			),
+			h(
 				"div",
 				{ class: "settings-actions" },
 				h("button", { class: "btn primary", type: "button", onclick: () => settingsEl.close() }, "닫기"),
 			),
 		),
 	);
-	renderApp();
-	renderCli();
+	renderUpdatesDialog = render;
+	settingsEl.addEventListener(
+		"close",
+		() => {
+			if (renderUpdatesDialog === render) renderUpdatesDialog = null;
+		},
+		{ once: true },
+	);
+	render();
 	if (!settingsEl.open) settingsEl.showModal();
-	await checkUpdates(false);
-	renderApp();
-	renderCli();
+	void checkUpdates(false);
+	void runCompat();
 }
+
+// The CLI updated itself (or was updated from here): new agents already use
+// it; move running chats over too, and re-check what the app relies on.
+void listen<{ from: string | null; to: string | null }>("cli://version", async (event) => {
+	const { from, to } = event.payload;
+	cliCurrent = to;
+	if (cliLatest && to && cliLatest === to) cliLatest = to;
+	for (const id of [null, ...accounts.map((a) => a.id)]) pool.forgetAccount(id);
+	let moved = 0;
+	for (const tab of tabs) {
+		if (tab.view instanceof ChatView) {
+			moved += 1;
+			tab.view.setAccount(tab.view.accountId, accountName(tab.view.accountId), true, `CLI ${to ?? "새 버전"}(으)로 다시 연결했습니다.`);
+		}
+	}
+	catalogAt = 0;
+	const checks = await runCompat();
+	const broken = checks.filter((c) => !c.ok);
+	toast(
+		`Command Code CLI가 ${from ?? "?"} → ${to ?? "?"}(으)로 업데이트됐습니다${moved ? ` · 대화 ${moved}개를 새 버전으로 다시 연결` : ""}`,
+		broken.length ? "error" : "ok",
+		10_000,
+		broken.length ? { label: `호환성 문제 ${broken.length}건 보기`, run: () => void openUpdates() } : undefined,
+	);
+});
 
 // ------------------------------------------------------------- settings
 
@@ -1357,7 +1700,7 @@ void appWindow.onDragDropEvent(async (event) => {
 // Dev builds expose the shell for driving the UI over the WebView2 debug port.
 if (import.meta.env.DEV) {
 	Object.assign(window, {
-		__cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal, closeTab, refreshAccounts, switchAccount, addAccount, cliLogin, openModelsDialog, openUpdates, accessFor, loadBilling },
+		__cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal, closeTab, refreshAccounts, switchAccount, addAccount, cliLogin, openModelsDialog, openUpdates, accessFor, loadBilling, reportLimit, runCompat, renderGauge },
 	});
 }
 
@@ -1385,7 +1728,8 @@ void (async () => {
 		if ((appInfo?.commitsBehind ?? 0) > 0) toast("앱 새 버전이 있습니다 · 왼쪽 아래 버전을 눌러 업데이트", "info", 8000);
 	});
 	// The CLI check spawns the CLI (~10 s); keep it off the startup path.
-	setTimeout(() => void checkUpdates(true), 20_000);
+	setTimeout(() => void checkUpdates(true).then(() => runCompat()), 20_000);
+	renderGauge();
 	void loadCatalog().then(() => loadAllBilling());
 
 	// A folder from the command line (or CMDC_GUI_START_DIR) opens straight

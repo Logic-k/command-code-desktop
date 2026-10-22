@@ -17,6 +17,23 @@ export interface Billing {
 	monthlyCredits: number;
 	purchasedCredits: number;
 	freeCredits: number;
+	/** End of the billing period (ISO 8601). */
+	periodEnd: string | null;
+	/** Rolling-window limits as the API sends them, while a plan has them. */
+	windowLimits: WindowLimits | null;
+}
+
+interface WindowLimit {
+	used?: number;
+	cap?: number;
+	resetAt?: number | string;
+}
+
+export interface WindowLimits {
+	limited?: boolean;
+	fiveHour?: WindowLimit | null;
+	weekly?: WindowLimit | null;
+	daily?: WindowLimit | null;
 }
 
 export interface CatalogModel {
@@ -138,4 +155,67 @@ export function accountBlocker(billing: Billing | null): string | null {
 			: "이 계정은 요금제와 크레딧이 없어 어떤 모델도 쓸 수 없습니다. 무료 모델도 잔액 $1 이상이 필요합니다.";
 	}
 	return null;
+}
+
+/** Monthly credit allowance per plan, in dollars (the CLI's `Tr`). */
+const PLAN_ALLOWANCE: Record<string, number> = {
+	"individual-go": 10,
+	"individual-go-v1": 10,
+	"individual-goat": 70,
+	"individual-pro": 30,
+	"individual-pro-v1": 80,
+	"individual-provider": 15,
+	"individual-max": 150,
+	"individual-ultra": 300,
+	"teams-pro": 40,
+};
+
+export interface UsageWindow {
+	label: string;
+	used: number;
+	cap: number;
+	percent: number;
+	/** Epoch ms, when known. */
+	resetAt: number | null;
+}
+
+export interface Usage {
+	remaining: number;
+	/** The month's pool (plan allowance + top-ups), when the plan is known. */
+	pool: number | null;
+	/** Share of the pool spent, 0-100; null when there is no plan to measure against. */
+	percent: number | null;
+	daysLeft: number | null;
+	windows: UsageWindow[];
+}
+
+function epochMs(value: number | string | undefined): number | null {
+	if (value === undefined || value === null) return null;
+	if (typeof value === "number") return value > 1e12 ? value : value * 1000;
+	const parsed = Date.parse(value);
+	return Number.isNaN(parsed) ? null : parsed;
+}
+
+/** The CLI's /usage numbers: spent share of the month's pool, days left, and
+ * any 5-hour / weekly windows. */
+export function usageOf(billing: Billing, now = Date.now()): Usage {
+	const remaining = balance(billing);
+	const allowance = billing.planId ? PLAN_ALLOWANCE[billing.planId] : undefined;
+	const pool =
+		allowance !== undefined
+			? Math.max(allowance, billing.monthlyCredits) + billing.purchasedCredits + billing.freeCredits
+			: null;
+	const percent = pool && pool > 0 ? Math.min(100, Math.max(0, ((pool - remaining) / pool) * 100)) : null;
+	const end = billing.periodEnd ? Date.parse(billing.periodEnd) : Number.NaN;
+	const daysLeft = Number.isNaN(end) ? null : Math.max(0, Math.ceil((end - now) / 86_400_000));
+	const windows: UsageWindow[] = [];
+	const add = (label: string, window: WindowLimit | null | undefined) => {
+		if (!window || !window.cap) return;
+		const used = window.used ?? 0;
+		windows.push({ label, used, cap: window.cap, percent: Math.min(100, (used / window.cap) * 100), resetAt: epochMs(window.resetAt) });
+	};
+	add("5시간", billing.windowLimits?.fiveHour);
+	add("주간", billing.windowLimits?.weekly);
+	add("일간", billing.windowLimits?.daily);
+	return { remaining, pool, percent, daysLeft, windows };
 }

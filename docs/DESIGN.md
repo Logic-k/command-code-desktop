@@ -142,6 +142,19 @@ Rust는 **바이트 운반만** 한다. JSON-RPC 해석은 전부 TypeScript에�
   `update-build`로 돌려 빌드하므로 실행 중인 exe가 잠기지 않고, 적용은 숨은 PowerShell이 앱 종료를 기다렸다가 exe를 복사·재실행한다.
   GitHub 저장소를 만들면 tauri-plugin-updater + 서명된 릴리스로 옮기는 것이 다음 단계.
 
+### 사용량 게이지와 업데이트 대응 (v0.4)
+
+- **숫자는 CLI `/usage`와 같다.** 크레딧 응답(`monthlyCredits`, `purchasedCredits`, `freeCredits`, `windowLimits`)과 구독의
+  `currentPeriodEnd`, 요금제별 기본 크레딧(CLI의 `Tr`: Go 10, GOAT 70, Pro 80, Max 150 …)으로
+  `사용률 = (기본+충전+보너스 − 잔액) ÷ (기본+충전+보너스)`. 5시간·주간 창은 서버가 `windowLimits`를 보낼 때만 그리고,
+  한도 오류(429, "resets at …")를 받으면 그 계정에 한도 도달 표시를 걸어 둔다.
+- **CLI 업데이트 대응.** Rust가 15초마다 설치된 CLI 버전을 읽어 바뀌면 `cli://version`을 보낸다. 새 에이전트는 원래도 새 버전을
+  쓰지만(실행할 때마다 설치 위치를 다시 읽음), 열린 대화는 계정 전환과 같은 재연결 경로로 새 버전에 붙인다.
+- **호환성 점검.** 앱이 기대는 CLI 내부 요소를 번들 문자열로 확인하고(`getCommandApiKeyFromEnv`, `session/request_permission`,
+  `session/load`, `minimumPlan`, `/alpha/billing/credits`, `windowLimits`), 실제 데이터(모델 목록, 요금 API, ACP 버전)도 함께 본다.
+  CLI가 바뀐 직후 자동으로 돌고, 업데이트 창에서 언제든 다시 돌릴 수 있다.
+- **업데이트 상태는 창 밖에 둔다.** 빌드 중에 업데이트 창을 닫아도 진행이 이어지고, 끝나면 "다시 시작해서 적용" 버튼이 붙은 알림이 뜬다.
+
 ## 6. 검증 기록 (2026-10-22)
 
 WebView2 디버그 포트(`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`)로 실제 앱 창을 CDP로 조작·캡처했다.
@@ -165,6 +178,11 @@ WebView2 디버그 포트(`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugg
 | (v0.4) 계정별 요금제·잔액 조회 | 계정A: Go(활성) · $X.XX / 계정B: 요금제 없음 · $0.00 (CLI와 같은 API) |
 | (v0.4) 잔액 $0 계정으로 채팅 | 보내기 전에 "어떤 모델도 쓸 수 없음 · 무료 모델도 $1 필요" 경고 + 계정 전환 버튼, 모델 95개 모두 비활성 |
 | (v0.4) Go 요금제 계정의 모델 목록 | 사용 가능 55 · 무료 4 · 업그레이드 필요 36 (예: Claude Sonnet 5.5 → GOAT 이상) |
+| (v0.4) 앱 자체 업데이트 (실제 릴리스 exe) | bba4dc1 빌드가 새 커밋 3bff700을 감지 → 별도 폴더에서 빌드(6분 54초) → 재시작 → 새 프로세스가 3bff700으로 실행, 남은 업데이트 0 |
+| (v0.4) 사용량 게이지 | Go · $X.XX 남음 → "45% · $X.XX", 14일 뒤 갱신. 5시간 창 85% 주입 시 노랑, 한도 도달 보고 시 빨강 + 초기화 시각 |
+| (v0.4) CLI 버전 변경 감지 | 이벤트 → 열린 대화가 "CLI 1.87.1(으)로 다시 연결" 후 바로 사용 가능, 알림 표시 |
+| (v0.4) CLI 호환성 점검 (1.87.1) | 10개 항목 모두 통과 |
+| (v0.4) 앱에서 `cmd update --check-only` | 7.6초, "Up to date (1.87.1)" |
 
 ## 7. 이후 단계 (v0.3+)
 
