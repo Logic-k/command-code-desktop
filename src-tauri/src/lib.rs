@@ -33,6 +33,7 @@ pub fn run() {
         .manage(PtyManager::default())
         .manage(AcpManager::default())
         .manage(accounts::PendingLogins::default())
+        .manage(updates::UpdateBuild::default())
         .setup(|app| {
             accounts::start(app.handle());
             updates::start_version_watch(app.handle());
@@ -73,6 +74,7 @@ pub fn run() {
         if let RunEvent::Exit = event {
             handle.state::<AcpManager>().kill_all();
             handle.state::<PtyManager>().kill_all();
+            handle.state::<updates::UpdateBuild>().kill();
         }
     });
 }

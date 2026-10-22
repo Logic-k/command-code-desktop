@@ -1256,12 +1256,24 @@ let appInfo: AppInfo | null = null;
 let cliLatest: string | null = null;
 let cliCurrent: string | null = null;
 let compat: Check[] = [];
-const appUpdate: { phase: "idle" | "building" | "ready" | "failed"; log: string[]; exe: string | null; error: string | null } = {
+const appUpdate: {
+	phase: "idle" | "building" | "ready" | "failed";
+	log: string[];
+	exe: string | null;
+	error: string | null;
+	startedAt: number;
+} = {
 	phase: "idle",
 	log: [],
 	exe: null,
 	error: null,
+	startedAt: 0,
 };
+
+function elapsed(since: number): string {
+	const seconds = Math.max(0, Math.floor((Date.now() - since) / 1000));
+	return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
 /** Re-renders the update dialog while it is open. */
 let renderUpdatesDialog: (() => void) | null = null;
 
@@ -1335,8 +1347,10 @@ async function startAppUpdate(): Promise<void> {
 	appUpdate.phase = "building";
 	appUpdate.log = [];
 	appUpdate.error = null;
+	appUpdate.startedAt = Date.now();
 	renderUpdatesDialog?.();
 	renderVersionLabel();
+	const ticker = window.setInterval(() => renderUpdatesDialog?.(), 1000);
 	const channel = new Channel<string>();
 	channel.onmessage = (line) => {
 		appUpdate.log.push(line);
@@ -1346,12 +1360,16 @@ async function startAppUpdate(): Promise<void> {
 	try {
 		appUpdate.exe = await invoke<string>("app_update_build", { onLog: channel });
 		appUpdate.phase = "ready";
-		toast("앱 새 버전이 준비됐습니다.", "ok", 30_000, { label: "다시 시작해서 적용", run: () => void applyAppUpdate() });
+		toast(`앱 새 버전이 준비됐습니다 (빌드 ${elapsed(appUpdate.startedAt)}).`, "ok", 60_000, {
+			label: "다시 시작해서 적용",
+			run: () => void applyAppUpdate(),
+		});
 	} catch (error) {
 		appUpdate.phase = "failed";
 		appUpdate.error = String(error);
 		toast(`앱 업데이트 빌드 실패: ${appUpdate.error}`, "error", 10_000, { label: "자세히", run: () => void openUpdates() });
 	}
+	window.clearInterval(ticker);
 	renderUpdatesDialog?.();
 	renderVersionLabel();
 }
@@ -1420,7 +1438,13 @@ function openUpdates(): void {
 		}
 		const phase = appUpdate.phase;
 		appBtn.textContent =
-			phase === "building" ? "빌드 중… (몇 분 걸립니다)" : phase === "ready" ? "다시 시작해서 적용" : phase === "failed" ? "다시 시도" : "앱 업데이트";
+			phase === "building"
+				? `빌드 중… ${elapsed(appUpdate.startedAt)} (보통 1~2분, 첫 빌드는 더 걸림)`
+				: phase === "ready"
+					? "다시 시작해서 적용"
+					: phase === "failed"
+						? "다시 시도"
+						: "앱 업데이트";
 		appBtn.disabled =
 			phase === "building" ||
 			(phase === "idle" && (!appInfo || appInfo.debug || (appInfo.commitsBehind ?? 0) === 0 || !appInfo.sourceDir));

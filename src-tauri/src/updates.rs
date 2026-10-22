@@ -122,8 +122,44 @@ pub fn app_info(app: AppHandle) -> AppInfo {
     }
 }
 
-/// Build the latest source as a release into the app data dir, streaming the
-/// build log. Returns the new executable's path.
+/// The update build in progress, if any: the pid of the step being run.
+/// Only one build may run, and none may outlive the app.
+#[derive(Default)]
+pub struct UpdateBuild(std::sync::Mutex<Option<u32>>);
+
+impl UpdateBuild {
+    /// Stop the running build and everything it started (pnpm, cargo, rustc).
+    pub fn kill(&self) {
+        if let Some(pid) = self.0.lock().ok().and_then(|mut current| current.take()) {
+            kill_tree(pid);
+        }
+    }
+}
+
+fn kill_tree(pid: u32) {
+    let _ = hidden(
+        Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .status();
+}
+
+fn alive(pid: u32) -> bool {
+    hidden(Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]))
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+        .unwrap_or(false)
+}
+
+/// Build the latest source into the app data dir, streaming the build log.
+/// Returns the new executable's path.
+///
+/// Update builds trade the release profile's link-time optimisation for speed
+/// (LTO off, parallel codegen, incremental), so a rebuild after a small change
+/// takes about a minute instead of several. Shipping builds made with
+/// `pnpm tauri build` keep the full profile.
 #[tauri::command]
 pub async fn app_update_build(app: AppHandle, on_log: Channel<String>) -> Result<String, String> {
     let dir = source_dir().ok_or("소스 폴더를 찾지 못했습니다.")?;
@@ -132,7 +168,28 @@ pub async fn app_update_build(app: AppHandle, on_log: Channel<String>) -> Result
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("update-build");
-    tauri::async_runtime::spawn_blocking(move || {
+    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    let pid_file = target.join("build.pid");
+
+    {
+        let current = app.state::<UpdateBuild>();
+        let current = current.0.lock().map_err(|e| e.to_string())?;
+        if current.is_some_and(alive) {
+            return Err("이미 업데이트를 빌드하고 있습니다.".into());
+        }
+    }
+    // A build left by an earlier run of the app (closed mid-build) still holds
+    // cargo's lock on this directory; end it instead of queueing behind it.
+    if let Some(pid) = std::fs::read_to_string(&pid_file).ok().and_then(|t| t.trim().parse::<u32>().ok()) {
+        if alive(pid) {
+            let _ = on_log.send(format!("이전 실행에서 남은 빌드(pid {pid})를 정리합니다."));
+            kill_tree(pid);
+        }
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
+    let handle = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let run = |label: &str, args: &[&str]| -> Result<(), String> {
             let _ = on_log.send(format!("$ {label}"));
             let mut child = hidden(
@@ -141,12 +198,19 @@ pub async fn app_update_build(app: AppHandle, on_log: Channel<String>) -> Result
                     .args(args)
                     .current_dir(&dir)
                     .env("CARGO_TARGET_DIR", &target)
+                    .env("CARGO_PROFILE_RELEASE_LTO", "false")
+                    .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16")
+                    .env("CARGO_PROFILE_RELEASE_INCREMENTAL", "true")
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped()),
             )
             .spawn()
             .map_err(|e| format!("{label}: {e}"))?;
+            if let Ok(mut current) = handle.state::<UpdateBuild>().0.lock() {
+                *current = Some(child.id());
+            }
+            let _ = std::fs::write(&pid_file, child.id().to_string());
             let stderr = child.stderr.take();
             let log = on_log.clone();
             let err_thread = std::thread::spawn(move || {
@@ -169,16 +233,28 @@ pub async fn app_update_build(app: AppHandle, on_log: Channel<String>) -> Result
                 Err(format!("{label} 실패 (종료 코드 {:?})", status.code()))
             }
         };
-        run("pnpm install", &["pnpm", "install", "--frozen-lockfile"])?;
-        run("pnpm tauri build", &["pnpm", "tauri", "build", "--no-bundle"])?;
+        let started = std::time::SystemTime::now();
+        let outcome = run("pnpm install", &["pnpm", "install", "--frozen-lockfile"])
+            .and_then(|_| run("pnpm tauri build", &["pnpm", "tauri", "build", "--no-bundle"]));
+        let _ = std::fs::remove_file(&pid_file);
+        outcome?;
         let exe = target.join("release").join("cmdc-gui.exe");
-        if !exe.is_file() {
-            return Err(format!("빌드 결과를 찾지 못했습니다: {}", exe.display()));
+        // A build that did not write the exe (cancelled, stale) is not an update.
+        let fresh = std::fs::metadata(&exe)
+            .and_then(|m| m.modified())
+            .is_ok_and(|modified| modified >= started);
+        if !fresh {
+            return Err(format!("빌드는 끝났지만 새 실행 파일이 만들어지지 않았습니다: {}", exe.display()));
         }
         Ok(exe.to_string_lossy().into_owned())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    if let Ok(mut current) = app.state::<UpdateBuild>().0.lock() {
+        *current = None;
+    }
+    result
 }
 
 /// Replace the running exe with `new_exe` and restart: a hidden PowerShell
