@@ -1,7 +1,9 @@
 pub mod accounts;
 pub mod acp;
+pub mod billing;
 pub mod launch;
 pub mod pty;
+pub mod updates;
 
 use acp::AcpManager;
 use pty::PtyManager;
@@ -41,6 +43,12 @@ pub fn run() {
             accounts::account_login_cancel,
             accounts::account_remove,
             accounts::cli_logout,
+            billing::account_billing,
+            billing::model_catalog,
+            updates::app_info,
+            updates::app_update_build,
+            updates::app_update_apply,
+            updates::cli_update,
             launch::cmdc_launch,
             launch::start_dir,
             launch::dir_exists,

@@ -130,6 +130,18 @@ Rust는 **바이트 운반만** 한다. JSON-RPC 해석은 전부 TypeScript에�
 - **경쟁 조건 방지.** `open()`마다 세대 번호를 올리고, 오래된 `open()`은 다음 `await`에서 멈추며 자기가 만든 세션만 자기 연결에서 닫는다.
   터미널 전환은 Promise 체인으로 직렬화. 300ms 안에 세 번 전환해도 마지막 계정 하나로 정리됨을 확인.
 
+### 모델 접근과 업데이트 (v0.4)
+
+- **근거 세 가지를 합친다.** ① CLI가 캐시하는 모델 목록(`~/.commandcode/cache/model-catalog/v1/*.json`)의 모델별
+  `minimumPlan`·가격·`free` 배지, ② CLI의 `evaluateModelAccess`(충전/보너스 크레딧 있으면 전부 허용, 아니면 요금제 순위
+  `go < go-v1 < goat < pro < pro-v1 < provider < max < ultra < teams-pro`), ③ 공식 문서의 "무료 모델도 잔액 $1 이상 필요".
+- **계정 상태는 CLI와 같은 API로**: `GET /alpha/whoami` → `org.id`, `/alpha/billing/subscriptions?orgId=`, `/alpha/billing/credits?orgId=`
+  (api.commandcode.ai, `Authorization: Bearer <key>`). Rust(`billing.rs`, `ureq`)가 계정 키로 호출하고 결과만 웹뷰로 보낸다.
+- **앱 업데이트는 소스 기반.** 원격 저장소도 서명 키도 아직 없으므로 배포 서버형 자동 업데이트(tauri-plugin-updater) 대신
+  `build.rs`가 빌드 커밋을 바이너리에 넣고, 앱이 소스 폴더 HEAD와 비교한다. 업데이트는 `CARGO_TARGET_DIR`을 앱 데이터의
+  `update-build`로 돌려 빌드하므로 실행 중인 exe가 잠기지 않고, 적용은 숨은 PowerShell이 앱 종료를 기다렸다가 exe를 복사·재실행한다.
+  GitHub 저장소를 만들면 tauri-plugin-updater + 서명된 릴리스로 옮기는 것이 다음 단계.
+
 ## 6. 검증 기록 (2026-10-22)
 
 WebView2 디버그 포트(`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`)로 실제 앱 창을 CDP로 조작·캡처했다.

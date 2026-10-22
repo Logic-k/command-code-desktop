@@ -24,6 +24,7 @@ import type {
 	ToolCall,
 	ToolContent,
 } from "../acp/types";
+import { accountBlocker, type Billing, type Catalog, findModel, modelAccess } from "../billing";
 import type { Settings } from "../store";
 import { diffStats, renderDiff } from "../ui/diff";
 import { basename, h, svg } from "../ui/dom";
@@ -39,6 +40,10 @@ export interface ChatHost {
 	openTerminal(cwd: string, args: string[]): void;
 	/** Sign the given account in again (null: the CLI's own login). */
 	login(accountId: string | null): void;
+	/** Plan/credits for an account and the model catalog, when known. */
+	access(accountId: string | null): { billing: Billing | null; catalog: Catalog | null };
+	/** Open the account menu (to switch away from an account that cannot run). */
+	openAccounts(): void;
 }
 
 interface ChatOptions {
@@ -180,6 +185,8 @@ export class ChatView {
 	private suppressReplay = false;
 	/** An account change arrived mid-turn; rebind once the turn ends. */
 	private rebindPending = false;
+	/** The banner currently shows an account/model access warning. */
+	private accessBanner = false;
 	/** Bumped by every open(); an older open() that sees a newer value stops. */
 	private openGen = 0;
 	private disposed = false;
@@ -353,6 +360,8 @@ export class ChatView {
 			this.ready = true;
 			this.setStatus("");
 			this.hideBanner();
+			this.accessBanner = false;
+			this.checkAccess();
 			this.scrollToBottom(true);
 			// Queued exactly once; a reconnect must not run it again.
 			if (this.options.initialPrompt) this.queue.unshift(this.options.initialPrompt);
@@ -514,18 +523,99 @@ export class ChatView {
 	}
 
 	private renderConfig(): void {
-		const fill = (select: HTMLSelectElement, option: ConfigOption | undefined) => {
-			select.classList.toggle("hidden", !option);
-			if (!option) return;
-			select.replaceChildren(
-				...(option.options ?? []).map((choice) =>
+		const model = this.configOptions.find((o) => o.id === "model");
+		this.modelSelect.classList.toggle("hidden", !model);
+		if (model) this.fillModels(model);
+		const effort = this.configOptions.find((o) => o.id === "effort");
+		this.effortSelect.classList.toggle("hidden", !effort);
+		if (effort) {
+			this.effortSelect.replaceChildren(
+				...(effort.options ?? []).map((choice) =>
 					h("option", { value: choice.value, title: choice.description ?? "" }, choice.name),
 				),
 			);
-			select.value = String(option.currentValue);
-		};
-		fill(this.modelSelect, this.configOptions.find((o) => o.id === "model"));
-		fill(this.effortSelect, this.configOptions.find((o) => o.id === "effort"));
+			this.effortSelect.value = String(effort.currentValue);
+		}
+		this.checkAccess();
+	}
+
+	/** The model list, grouped by whether this chat's account may use each
+	 * model (src/billing.ts); unusable ones stay visible but disabled. */
+	private fillModels(option: ConfigOption): void {
+		const { billing, catalog } = this.host.access(this.options.accountId);
+		const groups: Record<string, HTMLOptionElement[]> = { ok: [], free: [], locked: [], blocked: [] };
+		for (const choice of option.options ?? []) {
+			const access = modelAccess(findModel(catalog, choice.value), billing);
+			const group = !access.allowed
+				? access.kind === "locked"
+					? "locked"
+					: "blocked"
+				: access.kind === "free"
+					? "free"
+					: "ok";
+			groups[group].push(
+				h(
+					"option",
+					{ value: choice.value, title: choice.description ?? "", disabled: !access.allowed },
+					access.note ? `${choice.name} · ${access.note}` : choice.name,
+				),
+			);
+		}
+		const label: Record<string, string> = billing
+			? {
+					ok: "사용 가능",
+					free: "무료 모델",
+					locked: "요금제 업그레이드 필요",
+					blocked: "크레딧 부족으로 사용 불가",
+				}
+			: { ok: "모델", free: "무료 모델", locked: "", blocked: "" };
+		const children = Object.entries(groups)
+			.filter(([, items]) => items.length)
+			.map(([key, items]) => h("optgroup", { label: label[key] }, items));
+		this.modelSelect.replaceChildren(...children);
+		this.modelSelect.value = String(option.currentValue);
+	}
+
+	/** Re-evaluate models after the account's plan or credits were (re)loaded. */
+	refreshAccess(): void {
+		if (this.configOptions.length) this.renderConfig();
+		else this.checkAccess();
+	}
+
+	/** Warn before a turn fails: the account can run nothing, or the chosen
+	 * model is not available to it. */
+	private checkAccess(): void {
+		const { billing, catalog } = this.host.access(this.options.accountId);
+		if (!billing) return;
+		const blocker = accountBlocker(billing);
+		if (blocker) {
+			this.showBanner("alert", `${this.options.accountName}: ${blocker}`, "계정 전환", () => this.host.openAccounts());
+			this.accessBanner = true;
+			return;
+		}
+		const model = this.configOptions.find((o) => o.id === "model");
+		const current = model ? String(model.currentValue) : null;
+		const access = current ? modelAccess(findModel(catalog, current), billing) : null;
+		if (access && !access.allowed) {
+			const usable = (model?.options ?? []).find((c) => modelAccess(findModel(catalog, c.value), billing).allowed);
+			const preferred =
+				catalog?.roles?.default && modelAccess(findModel(catalog, catalog.roles.default), billing).allowed
+					? (model?.options ?? []).find((c) => c.value === catalog.roles?.default)
+					: undefined;
+			const target = preferred ?? usable;
+			this.showBanner(
+				"alert",
+				`지금 모델은 ${this.options.accountName} 계정에서 쓸 수 없습니다 (${access.note}).`,
+				target ? `${target.name}(으)로 바꾸기` : "계정 전환",
+				target ? () => void this.changeConfig("model", target.value) : () => this.host.openAccounts(),
+			);
+			this.accessBanner = true;
+			return;
+		}
+		if (this.accessBanner) {
+			this.accessBanner = false;
+			this.hideBanner();
+		}
 	}
 
 	private async changeMode(modeId: string): Promise<void> {
@@ -1277,6 +1367,8 @@ export class ChatView {
 		const info = explainError(error);
 		if (info.login) {
 			this.showBanner("alert", info.text, "로그인", () => this.host.login(this.options.accountId));
+		} else if (info.credits) {
+			this.showBanner("alert", `${this.options.accountName}: ${info.text}`, "계정 전환", () => this.host.openAccounts());
 		} else if (retry) {
 			this.showBanner("alert", info.text, "다시 시도", retry);
 		} else {
@@ -1394,8 +1486,18 @@ export function describeError(error: unknown): string {
 }
 
 /** Turn agent errors into something a person can act on. */
-function explainError(error: unknown): { text: string; login: boolean } {
+function explainError(error: unknown): { text: string; login: boolean; credits?: boolean } {
 	const message = error instanceof Error ? error.message : String(error);
+	if (/insufficient credits|purchase more credits/i.test(message)) {
+		return {
+			text: "이 계정에 크레딧이 부족합니다. 크레딧을 충전하거나, 사용 가능한 다른 계정이나 모델로 바꾸세요. (무료 모델도 잔액 $1 이상이 필요합니다)",
+			login: false,
+			credits: true,
+		};
+	}
+	if (/not available on your plan|upgrade your plan|requires? (the )?\w+ plan/i.test(message)) {
+		return { text: `이 모델은 지금 요금제에서 쓸 수 없습니다. 다른 모델을 고르세요. (${message})`, login: false, credits: true };
+	}
 	if (/not authenticated|cmd login/i.test(message)) {
 		return { text: "Command Code에 로그인되어 있지 않습니다.", login: true };
 	}

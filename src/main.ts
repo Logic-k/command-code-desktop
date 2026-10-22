@@ -11,8 +11,18 @@ import {
 	requestPermission,
 	sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import * as pool from "./acp/pool";
+import {
+	accountBlocker,
+	type Billing,
+	billingSummary,
+	type Catalog,
+	modelAccess,
+	planName,
+	money,
+	balance,
+} from "./billing";
 import type { Launch, SessionInfo } from "./acp/types";
 import {
 	forgetProject,
@@ -27,6 +37,7 @@ import {
 import { basename, byId, h, relativeTime, svg } from "./ui/dom";
 import { icons } from "./ui/icons";
 import { ChatView, describeError } from "./views/chat";
+import { Channel } from "@tauri-apps/api/core";
 import { TerminalView } from "./views/terminal";
 import "./styles.css";
 
@@ -228,7 +239,13 @@ function toggleProject(path: string): void {
 	renderProjects();
 }
 
+/** The throwaway homes add-account logins run in; never a project. */
+function isLoginHome(path: string): boolean {
+	return /[\\/]ai\.commandcode\.cmdcgui[\\/]login([\\/]|$)/i.test(path);
+}
+
 function rememberProject(path: string): void {
+	if (isLoginHome(path)) return;
 	projects = touchProject(path);
 	activeProject = path;
 	expanded.add(path.toLowerCase());
@@ -377,7 +394,11 @@ async function openChat(cwd: string, session?: SessionInfo, initialPrompt?: stri
 				if (!tab) return;
 				tab.busy = busy;
 				renderTab(tab);
-				if (!busy) refreshSessionsSoon(cwd);
+				if (!busy) {
+					refreshSessionsSoon(cwd);
+					// A finished turn spent credits.
+					if (tab.view instanceof ChatView) void loadBilling(tab.view.accountId, { maxAgeMs: 20_000 });
+				}
 			},
 			attention: (kind, body) => {
 				if (!tab) return;
@@ -385,6 +406,8 @@ async function openChat(cwd: string, session?: SessionInfo, initialPrompt?: stri
 			},
 			openTerminal: (dir, args) => void openTerminal(dir, args),
 			login: (accountId) => void (accountId ? addAccount() : cliLogin()),
+			access: (accountId) => accessFor(accountId),
+			openAccounts: () => setTimeout(() => toggleAccountMenu(true), 0),
 		},
 		{
 			cwd,
@@ -442,7 +465,8 @@ async function openTerminal(cwd: string, args: string[], options: TerminalOption
 }
 
 async function newChat(): Promise<void> {
-	const cwd = activeTab?.view.cwd ?? activeProject ?? (await pickFolder());
+	const tabCwd = activeTab && !(activeTab.view instanceof TerminalView && activeTab.view.isLogin) ? activeTab.view.cwd : null;
+	const cwd = tabCwd ?? (activeProject && !isLoginHome(activeProject) ? activeProject : null) ?? (await pickFolder());
 	if (cwd) await openChat(cwd);
 }
 
@@ -563,6 +587,57 @@ function accountName(id: string | null): string {
 	return cliUser ?? "로그인 안 됨";
 }
 
+// Plan and credits per account ("" = CLI login), and the CLI's model catalog.
+const billingCache = new Map<string, { at: number; billing: Billing | null; error: string | null }>();
+let catalog: Catalog | null = null;
+let catalogAt = 0;
+
+function accessFor(accountId: string | null): { billing: Billing | null; catalog: Catalog | null } {
+	return { billing: billingCache.get(accountId ?? "")?.billing ?? null, catalog };
+}
+
+async function loadCatalog(): Promise<void> {
+	if (catalog && Date.now() - catalogAt < 10 * 60_000) return;
+	try {
+		catalog = await invoke<Catalog>("model_catalog");
+		catalogAt = Date.now();
+	} catch (error) {
+		console.warn("model_catalog", error);
+	}
+}
+
+/** Fetch plan/credits for an account, then re-evaluate every chat on it. */
+async function loadBilling(accountId: string | null, { maxAgeMs = 60_000 } = {}): Promise<void> {
+	const key = accountId ?? "";
+	const cached = billingCache.get(key);
+	if (cached && Date.now() - cached.at < maxAgeMs) return;
+	await loadCatalog();
+	try {
+		const billing = await invoke<Billing>("account_billing", { accountId });
+		billingCache.set(key, { at: Date.now(), billing, error: null });
+	} catch (error) {
+		billingCache.set(key, { at: Date.now(), billing: cached?.billing ?? null, error: String(error) });
+	}
+	renderAccountSwitch();
+	if (!accountMenu.classList.contains("hidden")) toggleAccountMenu(true);
+	for (const tab of tabs) {
+		if (tab.view instanceof ChatView && (tab.view.accountId ?? "") === key) tab.view.refreshAccess();
+	}
+}
+
+function loadAllBilling(force = false): void {
+	const ids: (string | null)[] = [...(cliUser ? [null] : []), ...accounts.map((a) => a.id)];
+	for (const id of ids) void loadBilling(id, force ? { maxAgeMs: 0 } : {});
+}
+
+/** "Go · $X.XX", or what went wrong, for an account row. */
+function billingLine(accountId: string | null): string {
+	const entry = billingCache.get(accountId ?? "");
+	if (!entry) return "요금제 확인 중…";
+	if (entry.billing) return billingSummary(entry.billing);
+	return "요금제를 확인하지 못함";
+}
+
 async function refreshAccounts(): Promise<void> {
 	try {
 		const view = await invoke<{ cliUser: string | null; accounts: Account[] }>("account_list");
@@ -618,7 +693,11 @@ function renderAccountSwitch(): void {
 				"span",
 				{ class: "account-text" },
 				h("span", { class: "account-name" }, name),
-				h("span", { class: "account-sub" }, loggedOut ? "눌러서 로그인" : id ? "저장된 계정" : "CLI 로그인"),
+				h(
+					"span",
+					{ class: `account-sub${!loggedOut && accountBlocker(accessFor(id).billing) ? " warn" : ""}` },
+					loggedOut ? "눌러서 로그인" : billingLine(id),
+				),
 			),
 			svg(icons.chevron, "icon account-chevron"),
 		),
@@ -663,17 +742,18 @@ function toggleAccountMenu(force?: boolean): void {
 		accountMenu.classList.add("hidden");
 		return;
 	}
+	loadAllBilling();
 	accountMenu.replaceChildren(
 		h("div", { class: "account-menu-label" }, "계정"),
 		cliUser
-			? accountRow(null, cliUser, "CLI 로그인 (cmd login)", true, {
+			? accountRow(null, cliUser, `CLI 로그인 · ${billingLine(null)}`, true, {
 					label: "로그아웃",
 					run: () => void cliLogout(),
 					danger: true,
 				})
 			: accountRow(null, "CLI 로그인 안 됨", "cmd login", false, { label: "로그인", run: () => void cliLogin() }),
 		...accounts.map((a) =>
-			accountRow(a.id, a.userName, "저장된 계정", true, {
+			accountRow(a.id, a.userName, `저장된 계정 · ${billingLine(a.id)}`, true, {
 				label: "로그아웃",
 				run: () => void removeAccount(a.id),
 				danger: true,
@@ -681,6 +761,7 @@ function toggleAccountMenu(force?: boolean): void {
 		),
 		h("div", { class: "account-sep" }),
 		h("button", { class: "account-action", onclick: () => void addAccount() }, svg(icons.plus), "다른 계정으로 로그인…"),
+		h("button", { class: "account-action", onclick: () => void openModelsDialog() }, svg(icons.check), "계정별 사용 가능한 모델 보기…"),
 		h("div", { class: "account-note" }, "계정을 바꾸면 열려 있는 대화도 바로 그 계정으로 다시 연결됩니다. 대화 내용은 그대로 남습니다."),
 	);
 	const rect = accountEl.getBoundingClientRect();
@@ -706,6 +787,7 @@ async function switchAccount(id: string | null): Promise<void> {
 	sessionCache.clear();
 	renderProjects();
 	const moved = applyAccountToTabs(activeAccountId());
+	void loadBilling(activeAccountId());
 	if (previous !== activeAccountId()) {
 		const name = accountName(activeAccountId());
 		toast(moved ? `${name} 계정으로 전환 · 열린 탭 ${moved}개 다시 연결` : `${name} 계정으로 전환했습니다`, "ok");
@@ -810,6 +892,7 @@ void listen<{ dir: string; account: Account }>("accounts://login-complete", asyn
 	loginTabs.delete(dir);
 	// A re-login replaces the key: agents on the old key must go.
 	pool.forgetAccount(account.id);
+	billingCache.delete(account.id);
 	await refreshAccounts();
 	const already = activeAccountId() === account.id;
 	await switchAccount(account.id);
@@ -825,7 +908,9 @@ void listen<{ dir: string; error: string }>("accounts://login-failed", (event) =
 
 void listen("accounts://changed", async () => {
 	const before = cliUser;
+	billingCache.delete("");
 	await refreshAccounts();
+	if (cliUser) void loadBilling(null);
 	pool.forgetAccount(null);
 	if (cliUser && cliLoginTab) {
 		closeLoginTab(cliLoginTab);
@@ -841,6 +926,278 @@ void listen("accounts://changed", async () => {
 				: `${cliUser} 로그인 정보가 갱신됐습니다`;
 	toast(moved ? `${what} · 열린 탭 ${moved}개 다시 연결` : what, cliUser ? "ok" : "info");
 });
+
+// --------------------------------------------------------- model access
+
+/** Every model, grouped by whether the chosen account may use it. */
+async function openModelsDialog(accountId: string | null = activeAccountId()): Promise<void> {
+	toggleAccountMenu(false);
+	await Promise.all([loadCatalog(), loadBilling(accountId, { maxAgeMs: 30_000 })]);
+	const ids: (string | null)[] = [...(cliUser ? [null] : []), ...accounts.map((a) => a.id)];
+	const picker = h(
+		"select",
+		{ class: "select" },
+		ids.map((id) => h("option", { value: id ?? "" }, `${accountName(id)} · ${billingLine(id)}`)),
+	);
+	picker.value = accountId ?? "";
+	picker.addEventListener("change", () => void openModelsDialog(picker.value || null));
+
+	const { billing } = accessFor(accountId);
+	const models = (catalog?.data ?? []).filter((m) => !m.hidden);
+	const groups: { title: string; hint: string; items: HTMLElement[] }[] = [
+		{ title: "사용 가능", hint: "", items: [] },
+		{ title: "무료 모델", hint: "요청 비용 0원. 단, 세션을 시작하려면 잔액 $1 이상 필요 (공식 문서)", items: [] },
+		{ title: "요금제 업그레이드 필요", hint: "", items: [] },
+		{ title: "크레딧 부족으로 사용 불가", hint: "", items: [] },
+	];
+	for (const model of models) {
+		const access = modelAccess(model, billing);
+		const index = !access.allowed ? (access.kind === "locked" ? 2 : 3) : access.kind === "free" ? 1 : 0;
+		groups[index].items.push(
+			h(
+				"div",
+				{ class: `model-row${access.allowed ? "" : " off"}`, title: model.display?.notice ?? "" },
+				h("span", { class: "model-name" }, model.display?.label ?? model.name),
+				h("span", { class: "model-vendor" }, model.display?.group ?? ""),
+				h("span", { class: "model-note" }, access.note || (model.minimumPlan ? `${planName(model.minimumPlan)} 이상` : "")),
+			),
+		);
+	}
+	const blocker = accountBlocker(billing);
+	const entry = billingCache.get(accountId ?? "");
+	settingsEl.replaceChildren(
+		h(
+			"div",
+			{ class: "settings models" },
+			h("h2", null, "계정별 사용 가능한 모델"),
+			h("label", { class: "field" }, h("span", { class: "field-label" }, "계정"), picker),
+			billing
+				? h(
+						"div",
+						{ class: `models-summary${blocker ? " warn" : ""}` },
+						h("strong", null, `${planName(billing.planId)} 요금제`),
+						` · 잔액 ${money(balance(billing))} (월 ${money(billing.monthlyCredits)} + 충전 ${money(billing.purchasedCredits)} + 보너스 ${money(billing.freeCredits)})`,
+						blocker ? h("div", null, blocker) : null,
+					)
+				: h("div", { class: "models-summary warn" }, entry?.error ?? "요금제를 확인하지 못했습니다."),
+			h(
+				"div",
+				{ class: "models-list" },
+				groups
+					.filter((g) => g.items.length)
+					.map((g) =>
+						h(
+							"section",
+							null,
+							h("h3", null, `${g.title} (${g.items.length})`),
+							g.hint ? h("p", { class: "field-help" }, g.hint) : null,
+							g.items,
+						),
+					),
+			),
+			h(
+				"p",
+				{ class: "field-help" },
+				"기준: CLI가 쓰는 모델 목록의 모델별 최소 요금제와 CLI의 접근 판정 규칙, 그리고 공식 요금 문서(commandcode.ai/docs/resources/pricing-limits). 최종 판단은 서버가 하므로 드물게 다를 수 있습니다.",
+			),
+			h(
+				"div",
+				{ class: "settings-actions" },
+				h(
+					"button",
+					{ class: "btn", type: "button", onclick: () => void openUrl("https://commandcode.ai/docs/resources/pricing-limits") },
+					"공식 요금 안내",
+				),
+				h("button", { class: "btn primary", type: "button", onclick: () => settingsEl.close() }, "닫기"),
+			),
+		),
+	);
+	if (!settingsEl.open) settingsEl.showModal();
+}
+
+// -------------------------------------------------------------- updates
+//
+// CLI: `cmd update` (the CLI also updates itself in the background; new
+// agents pick up a new version on their own). App: rebuilt from the source
+// folder it was built from, then swapped in on restart (src-tauri/src/updates.rs).
+
+interface AppInfo {
+	version: string;
+	commit: string;
+	debug: boolean;
+	sourceDir: string | null;
+	sourceCommit: string | null;
+	commitsBehind: number | null;
+	changes: string[];
+}
+
+let appInfo: AppInfo | null = null;
+let cliLatest: string | null = null;
+let cliCurrent: string | null = null;
+
+function renderVersionLabel(): void {
+	const label = byId("cli-version");
+	const appBehind = (appInfo?.commitsBehind ?? 0) > 0;
+	const cliBehind = Boolean(cliLatest && cliCurrent && cliLatest !== cliCurrent);
+	label.replaceChildren(
+		`앱 ${appInfo?.version ?? ""} · CLI ${cliCurrent ?? "?"}`,
+		...(appBehind || cliBehind ? [h("span", { class: "update-dot" }, " 업데이트 있음")] : []),
+	);
+	label.title = "업데이트 확인";
+}
+
+async function checkUpdates(cli: boolean): Promise<void> {
+	appInfo = await invoke<AppInfo>("app_info").catch(() => null);
+	const launch = await invoke<Launch>("cmdc_launch").catch(() => null);
+	cliCurrent = launch?.version ?? null;
+	if (cli) {
+		const result = await invoke<{ output: string; version: string | null }>("cli_update", { checkOnly: true }).catch(() => null);
+		if (result) {
+			const latest = result.output.match(/Latest:\s*v?([\d.]+)/i)?.[1];
+			cliLatest = /update available/i.test(result.output) && latest ? latest : (result.version ?? cliCurrent);
+		}
+	}
+	renderVersionLabel();
+}
+
+async function openUpdates(): Promise<void> {
+	const log = h("pre", { class: "update-log hidden" });
+	const appStatus = h("div", { class: "update-status" });
+	const cliStatus = h("div", { class: "update-status" });
+	const appBtn = h("button", { class: "btn primary", type: "button" }, "앱 업데이트");
+	const cliBtn = h("button", { class: "btn", type: "button" }, "CLI 업데이트 확인");
+
+	const renderApp = () => {
+		if (!appInfo) {
+			appStatus.textContent = "앱 정보를 읽지 못했습니다.";
+			appBtn.disabled = true;
+			return;
+		}
+		const behind = appInfo.commitsBehind ?? 0;
+		appStatus.replaceChildren(
+			h("div", null, h("strong", null, `Command Code Desktop ${appInfo.version}`), ` (${appInfo.commit.slice(0, 7) || "커밋 정보 없음"})`),
+			h("div", { class: "muted small" }, `소스 폴더: ${appInfo.sourceDir ?? "찾지 못함"}`),
+			appInfo.debug
+				? h("div", { class: "muted small" }, "개발 모드로 실행 중이라 소스를 고치면 바로 반영됩니다.")
+				: behind > 0
+					? h(
+							"div",
+							null,
+							h("div", { class: "update-new" }, `새 버전이 있습니다 · 변경 ${behind}개`),
+							h("ul", { class: "update-changes" }, appInfo.changes.map((c) => h("li", null, c))),
+						)
+					: h("div", { class: "muted small" }, "최신 버전입니다."),
+		);
+		appBtn.disabled = appInfo.debug || behind === 0 || !appInfo.sourceDir;
+	};
+	const renderCli = () => {
+		const behind = cliLatest && cliCurrent && cliLatest !== cliCurrent;
+		cliStatus.replaceChildren(
+			h("div", null, h("strong", null, `Command Code CLI ${cliCurrent ?? "?"}`)),
+			h(
+				"div",
+				{ class: behind ? "update-new" : "muted small" },
+				behind ? `새 버전 ${cliLatest}이(가) 있습니다.` : cliLatest ? "최신 버전입니다." : "확인 전입니다.",
+			),
+			h("div", { class: "muted small" }, "CLI는 스스로도 백그라운드에서 업데이트합니다. 새로 여는 대화부터 새 버전을 씁니다."),
+		);
+		cliBtn.textContent = behind ? "CLI 지금 업데이트" : "CLI 업데이트 확인";
+	};
+
+	cliBtn.addEventListener("click", async () => {
+		const install = Boolean(cliLatest && cliCurrent && cliLatest !== cliCurrent);
+		cliBtn.disabled = true;
+		cliBtn.textContent = install ? "업데이트 중…" : "확인 중…";
+		try {
+			const result = await invoke<{ output: string; version: string | null }>("cli_update", { checkOnly: !install });
+			if (install) {
+				cliCurrent = result.version;
+				cliLatest = result.version;
+				// Agents already running keep the old version; new ones get the new one.
+				pool.stopAll();
+				toast(`CLI를 ${result.version ?? ""}(으)로 업데이트했습니다. 열린 대화는 다시 연결하면 새 버전을 씁니다.`, "ok");
+			} else {
+				await checkUpdates(false);
+				const latest = result.output.match(/Latest:\s*v?([\d.]+)/i)?.[1];
+				cliLatest = /update available/i.test(result.output) && latest ? latest : (result.version ?? cliCurrent);
+			}
+		} catch (error) {
+			toast(String(error), "error");
+		}
+		cliBtn.disabled = false;
+		renderCli();
+		renderVersionLabel();
+	});
+
+	appBtn.addEventListener("click", async () => {
+		appBtn.disabled = true;
+		appBtn.textContent = "빌드 중… (몇 분 걸립니다)";
+		log.classList.remove("hidden");
+		log.textContent = "";
+		const channel = new Channel<string>();
+		channel.onmessage = (line) => {
+			log.textContent += `${line}\n`;
+			log.scrollTop = log.scrollHeight;
+		};
+		try {
+			const exe = await invoke<string>("app_update_build", { onLog: channel });
+			appBtn.textContent = "다시 시작해서 적용";
+			appBtn.disabled = false;
+			appBtn.onclick = async () => {
+				const busy = tabs.filter((t) => t.busy).length;
+				if (busy) {
+					const ok = await ask(`작업 중인 탭 ${busy}개가 중지됩니다. 지금 다시 시작할까요?`, {
+						title: "업데이트 적용",
+						kind: "warning",
+						okLabel: "다시 시작",
+						cancelLabel: "나중에",
+					});
+					if (!ok) return;
+				}
+				pool.stopAll();
+				await invoke("app_update_apply", { newExe: exe });
+			};
+			toast("새 버전 빌드가 끝났습니다. '다시 시작해서 적용'을 누르세요.", "ok", 8000);
+		} catch (error) {
+			appBtn.textContent = "다시 시도";
+			appBtn.disabled = false;
+			toast(`앱 업데이트 실패: ${String(error)}`, "error", 8000);
+		}
+	});
+
+	settingsEl.replaceChildren(
+		h(
+			"div",
+			{ class: "settings" },
+			h("h2", null, "업데이트"),
+			h("section", { class: "update-block" }, h("h3", null, "앱"), appStatus, h("div", { class: "row" }, appBtn)),
+			log,
+			h(
+				"section",
+				{ class: "update-block" },
+				h("h3", null, "Command Code CLI"),
+				cliStatus,
+				h(
+					"div",
+					{ class: "row" },
+					cliBtn,
+					h("button", { class: "btn ghost", type: "button", onclick: () => void openUrl("https://commandcode.ai/changelog") }, "변경 내역"),
+				),
+			),
+			h(
+				"div",
+				{ class: "settings-actions" },
+				h("button", { class: "btn primary", type: "button", onclick: () => settingsEl.close() }, "닫기"),
+			),
+		),
+	);
+	renderApp();
+	renderCli();
+	if (!settingsEl.open) settingsEl.showModal();
+	await checkUpdates(false);
+	renderApp();
+	renderCli();
+}
 
 // ------------------------------------------------------------- settings
 
@@ -900,6 +1257,12 @@ function openSettings(): void {
 			h("label", { class: "check" }, notifyBox, "창이 뒤에 있을 때 완료·권한 요청을 알림으로 받기"),
 			h("label", { class: "check" }, thoughtsBox, "에이전트의 생각 과정을 펼쳐서 보기"),
 			field("터미널 글자 크기", fontSize),
+			h(
+				"button",
+				{ class: "btn", type: "button", onclick: () => void openUpdates() },
+				svg(icons.refresh),
+				"업데이트 확인…",
+			),
 			h(
 				"div",
 				{ class: "settings-actions" },
@@ -994,7 +1357,7 @@ void appWindow.onDragDropEvent(async (event) => {
 // Dev builds expose the shell for driving the UI over the WebView2 debug port.
 if (import.meta.env.DEV) {
 	Object.assign(window, {
-		__cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal, closeTab, refreshAccounts, switchAccount, addAccount, cliLogin },
+		__cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal, closeTab, refreshAccounts, switchAccount, addAccount, cliLogin, openModelsDialog, openUpdates, accessFor, loadBilling },
 	});
 }
 
@@ -1010,20 +1373,20 @@ void (async () => {
 	}
 
 	projects = loadProjects();
+	// Earlier versions could remember an add-account login home as a project.
+	for (const stray of projects.filter((p) => isLoginHome(p.path))) projects = forgetProject(stray.path);
 	const exists = await Promise.all(projects.map((p) => invoke<boolean>("dir_exists", { path: p.path }).catch(() => true)));
 	projects = projects.filter((_, i) => exists[i]);
 	renderProjects();
 	activate(null);
 
-	invoke<Launch>("cmdc_launch")
-		.then((launch) => {
-			const label = byId("cli-version");
-			label.textContent =
-				launch.via === "node" ? `command-code ${launch.version ?? ""}` : "command-code: npm 심으로 실행 (node 경로 못 찾음)";
-			label.title = launch.entry ?? launch.program;
-			label.addEventListener("click", () => launch.entry && void openPath(launch.entry.replace(/[\\/]dist[\\/]index\.mjs$/, "")));
-		})
-		.catch(() => undefined);
+	byId("cli-version").addEventListener("click", () => void openUpdates());
+	void checkUpdates(false).then(() => {
+		if ((appInfo?.commitsBehind ?? 0) > 0) toast("앱 새 버전이 있습니다 · 왼쪽 아래 버전을 눌러 업데이트", "info", 8000);
+	});
+	// The CLI check spawns the CLI (~10 s); keep it off the startup path.
+	setTimeout(() => void checkUpdates(true), 20_000);
+	void loadCatalog().then(() => loadAllBilling());
 
 	// A folder from the command line (or CMDC_GUI_START_DIR) opens straight
 	// into a chat, which makes the app scriptable from a shortcut.

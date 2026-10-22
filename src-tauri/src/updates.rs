@@ -1,0 +1,251 @@
+//! Keeping the app and the CLI current.
+//!
+//! * **CLI**: `cmd update [--check-only]`, run headless. The CLI also
+//!   auto-updates itself in the background; new agents pick up the new version
+//!   because `launch::resolve_launch` re-reads the install on every spawn.
+//! * **App**: the app is built from a local git checkout (the user's source
+//!   folder, baked in at build time). It compares the commit it was built from
+//!   with that folder's HEAD; when they differ, `app_update_build` builds a
+//!   release in a separate target dir (the running exe stays unlocked) and
+//!   `app_update_apply` swaps the exe once the app has exited, then relaunches.
+
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use serde::Serialize;
+use tauri::ipc::Channel;
+use tauri::{AppHandle, Manager};
+
+use crate::launch::{child_env, resolve_launch};
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// The commit this binary was built from (`build.rs`), empty if unknown.
+const BUILT_COMMIT: &str = env!("CMDC_GIT_COMMIT");
+/// The checkout this binary was built from: `src-tauri`'s parent.
+const SOURCE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+
+fn hidden(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn git(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = hidden(Command::new("git").current_dir(dir).args(args)).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn source_dir() -> Option<PathBuf> {
+    let dir = PathBuf::from(SOURCE_DIR);
+    if !dir.join("package.json").is_file() {
+        return None;
+    }
+    // canonicalize() yields a verbatim `\\?\` path on Windows; git and people
+    // both prefer the plain form.
+    let full = dir.canonicalize().unwrap_or(dir);
+    let text = full.to_string_lossy();
+    Some(PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    pub version: String,
+    pub commit: String,
+    pub debug: bool,
+    pub source_dir: Option<String>,
+    /// HEAD of the source folder, when it is a git checkout.
+    pub source_commit: Option<String>,
+    /// Commits in the source folder newer than this build.
+    pub commits_behind: Option<u32>,
+    /// Subjects of those commits, newest first (at most 20).
+    pub changes: Vec<String>,
+}
+
+#[tauri::command]
+pub fn app_info(app: AppHandle) -> AppInfo {
+    let source = source_dir();
+    let source_commit = source.as_deref().and_then(|dir| git(dir, &["rev-parse", "HEAD"]));
+    let (commits_behind, changes) = match (&source, &source_commit) {
+        (Some(dir), Some(head)) if !BUILT_COMMIT.is_empty() && head != BUILT_COMMIT => {
+            let range = format!("{BUILT_COMMIT}..{head}");
+            let count = git(dir, &["rev-list", "--count", &range]).and_then(|n| n.parse().ok());
+            let log = git(dir, &["log", "--format=%s", "-n", "20", &range])
+                .map(|text| text.lines().map(str::to_string).collect())
+                .unwrap_or_default();
+            (count, log)
+        }
+        (Some(_), Some(_)) => (Some(0), Vec::new()),
+        _ => (None, Vec::new()),
+    };
+    AppInfo {
+        version: app.package_info().version.to_string(),
+        commit: BUILT_COMMIT.to_string(),
+        debug: cfg!(debug_assertions),
+        source_dir: source.map(|d| d.to_string_lossy().into_owned()),
+        source_commit,
+        commits_behind,
+        changes,
+    }
+}
+
+/// Build the latest source as a release into the app data dir, streaming the
+/// build log. Returns the new executable's path.
+#[tauri::command]
+pub async fn app_update_build(app: AppHandle, on_log: Channel<String>) -> Result<String, String> {
+    let dir = source_dir().ok_or("소스 폴더를 찾지 못했습니다.")?;
+    let target = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("update-build");
+    tauri::async_runtime::spawn_blocking(move || {
+        let run = |label: &str, args: &[&str]| -> Result<(), String> {
+            let _ = on_log.send(format!("$ {label}"));
+            let mut child = hidden(
+                Command::new("cmd")
+                    .arg("/C")
+                    .args(args)
+                    .current_dir(&dir)
+                    .env("CARGO_TARGET_DIR", &target)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .spawn()
+            .map_err(|e| format!("{label}: {e}"))?;
+            let stderr = child.stderr.take();
+            let log = on_log.clone();
+            let err_thread = std::thread::spawn(move || {
+                if let Some(stderr) = stderr {
+                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                        let _ = log.send(strip_ansi(&line));
+                    }
+                }
+            });
+            if let Some(stdout) = child.stdout.take() {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    let _ = on_log.send(strip_ansi(&line));
+                }
+            }
+            let _ = err_thread.join();
+            let status = child.wait().map_err(|e| e.to_string())?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("{label} 실패 (종료 코드 {:?})", status.code()))
+            }
+        };
+        run("pnpm install", &["pnpm", "install", "--frozen-lockfile"])?;
+        run("pnpm tauri build", &["pnpm", "tauri", "build", "--no-bundle"])?;
+        let exe = target.join("release").join("cmdc-gui.exe");
+        if !exe.is_file() {
+            return Err(format!("빌드 결과를 찾지 못했습니다: {}", exe.display()));
+        }
+        Ok(exe.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Replace the running exe with `new_exe` and restart: a hidden PowerShell
+/// waits for this process to exit, copies the file, and relaunches it.
+#[tauri::command]
+pub fn app_update_apply(app: AppHandle, new_exe: String) -> Result<(), String> {
+    let new_exe = PathBuf::from(new_exe);
+    if !new_exe.is_file() {
+        return Err("새 실행 파일이 없습니다. 다시 빌드해 주세요.".into());
+    }
+    let current = std::env::current_exe().map_err(|e| e.to_string())?;
+    let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
+    let script = format!(
+        "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
+         $ok = $false; foreach ($i in 1..20) {{ try {{ Copy-Item -LiteralPath {src} -Destination {dst} -Force -ErrorAction Stop; $ok = $true; break }} catch {{ Start-Sleep -Milliseconds 500 }} }}; \
+         Start-Process -FilePath {dst}",
+        pid = std::process::id(),
+        src = quote(&new_exe),
+        dst = quote(&current),
+    );
+    hidden(
+        Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .spawn()
+    .map_err(|e| format!("업데이트 도우미를 시작하지 못했습니다: {e}"))?;
+    app.exit(0);
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliUpdate {
+    pub output: String,
+    pub version: Option<String>,
+}
+
+/// `cmd update` (or `--check-only`), headless. Returns the CLI's own message
+/// and the version installed afterwards.
+#[tauri::command]
+pub async fn cli_update(check_only: bool) -> Result<CliUpdate, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let launch = resolve_launch();
+        let mut cmd = Command::new(&launch.program);
+        cmd.args(&launch.prefix_args)
+            .arg("update")
+            .env_clear()
+            .envs(child_env(None, None)?)
+            .stdin(Stdio::null());
+        if check_only {
+            cmd.arg("--check-only");
+        }
+        let output = hidden(&mut cmd).output().map_err(|e| format!("cmd update: {e}"))?;
+        let text = strip_ansi(&format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("- "))
+            .collect();
+        Ok(CliUpdate {
+            output: lines.join("\n"),
+            version: resolve_launch().version,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

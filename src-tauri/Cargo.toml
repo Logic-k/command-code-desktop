@@ -1,6 +1,6 @@
 [package]
 name = "cmdc-gui"
-version = "0.2.0"
+version = "0.4.0"
 description = "Desktop GUI shell for the Command Code CLI"
 authors = ["you"]
 edition = "2024"
@@ -30,6 +30,7 @@ tauri-plugin-notification = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-single-instance = "2"
 keyring = { version = "3", features = ["windows-native"] }
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

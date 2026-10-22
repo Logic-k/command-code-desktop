@@ -146,6 +146,19 @@ fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
+/// The key an account calls the Command Code API with, for billing lookups.
+/// `None` is the CLI login, whose key is read from `auth.json` here in Rust
+/// and never handed to the webview.
+pub fn request_key(account_id: Option<&str>) -> Result<Option<String>, String> {
+    match account_id.filter(|id| !id.is_empty()) {
+        Some(_) => api_key_for(account_id),
+        None => Ok(cli_home()
+            .and_then(|home| read_auth(&home))
+            .and_then(|auth| auth.api_key)
+            .filter(|k| !k.is_empty())),
+    }
+}
+
 /// The key to inject for `account_id`; `None` means "use the CLI's own login".
 pub fn api_key_for(account_id: Option<&str>) -> Result<Option<String>, String> {
     let Some(id) = account_id.filter(|id| !id.is_empty()) else {
