@@ -886,6 +886,36 @@ kbd {
 	white-space: pre-wrap;
 	word-break: break-word;
 }
+/* A message written as a document renders as markdown and gets more room. */
+.bubble-body.md {
+	white-space: normal;
+}
+.bubble.doc {
+	max-width: 94%;
+}
+/* "원문" shows the message exactly as sent; visible on hover, or while it is on. */
+.bubble-raw {
+	align-self: flex-start;
+	margin: 6px 8px 0 0;
+	padding: 1px 8px;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	background: transparent;
+	color: var(--fg-faint);
+	font-size: 11px;
+	line-height: 16px;
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.12s;
+}
+.msg-user:hover .bubble-raw,
+.msg-user.raw .bubble-raw {
+	opacity: 1;
+}
+.bubble-raw:hover {
+	color: var(--fg);
+	background: var(--bg-hover);
+}
 .bubble-img {
 	display: block;
 	max-width: 280px;
@@ -1562,6 +1592,73 @@ kbd {
 /* Still being typed: no closing delimiter yet. */
 .math-chip.open {
 	opacity: 0.65;
+}
+/* 수식 · 문서 · × switch: pinned to the corner over the chips, sticky while a document scrolls. */
+.math-preview {
+	position: relative;
+	padding-right: 128px;
+}
+.preview-bar {
+	position: absolute;
+	top: 5px;
+	right: 8px;
+	display: flex;
+	gap: 3px;
+}
+.preview-mode {
+	padding: 1px 8px;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	background: var(--bg-elev);
+	color: var(--fg-faint);
+	font-size: 11px;
+	line-height: 16px;
+	cursor: pointer;
+}
+.preview-mode:hover {
+	color: var(--fg);
+	background: var(--bg-hover);
+}
+.preview-mode.active {
+	color: var(--accent);
+	border-color: var(--accent);
+}
+/* Document mode: the whole draft rendered like an agent message. */
+.math-preview.doc {
+	display: block;
+	max-height: 45vh;
+	padding: 8px 14px 10px;
+}
+.math-preview.doc .preview-bar {
+	position: sticky;
+	top: 0;
+	justify-content: flex-end;
+	margin: 0 0 2px;
+	z-index: 1;
+}
+.math-doc {
+	font-size: 14px;
+}
+.math-doc [data-tex].active {
+	background: var(--accent-soft);
+}
+
+/* Obsidian `![[file]]` embeds have no file here; show where one would go. */
+.embed-slot {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 1px 8px;
+	border: 1px dashed var(--border-strong);
+	border-radius: 6px;
+	color: var(--fg-dim);
+	font-size: 0.92em;
+	vertical-align: middle;
+}
+.embed-slot svg {
+	width: 14px;
+	height: 14px;
+	flex: none;
 }
 .composer-foot {
 	display: flex;

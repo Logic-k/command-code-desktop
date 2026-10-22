@@ -125,6 +125,54 @@ export function findMath(src: string, lenient = false): MathSpan[] {
 	return spans;
 }
 
+/**
+ * Whether text is written as a document rather than a plain sentence: a
+ * heading, list, table, fence, quote, rule or bold somewhere. The user's own
+ * messages are rendered as markdown only then, so `*` and `#` in an ordinary
+ * prompt stay what they are.
+ */
+export function looksLikeMarkdown(text: string): boolean {
+	return (
+		/^(?: {0,3}#{1,6} \S| {0,3}(?:[-*+]|\d+[.)]) \S| {0,3}> | {0,3}(?:```|~~~)| {0,3}\|.*\|[ \t]*$| {0,3}(?:-{3,}|\*{3,})[ \t]*$)/m.test(text) ||
+		/\*\*[^*\n]+\*\*/.test(text)
+	);
+}
+
+// ------------------------------------------------------------ obsidian
+//
+// Notes pasted from Obsidian carry `![[file.png|480]]` embeds. The file lives
+// in the vault, which this app cannot see, so the embed becomes a labelled
+// slot; the text sent to the agent keeps the original syntax.
+
+const EMBED = /!\[\[([^\]|\n]+?)(?:\|[^\]\n]*)?\]\]/y;
+
+function embedHtml(name: string): string {
+	const image = /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(name);
+	return `<span class="embed-slot" title="옵시디언 첨부 — 볼트 밖이라 여기서는 열 수 없습니다">${icons.image}${image ? "첨부 이미지 자리" : "첨부 자리"}: ${escapeHtml(name)}</span>`;
+}
+
+interface EmbedToken {
+	type: "obsidianEmbed";
+	raw: string;
+	text: string;
+}
+
+const obsidianEmbed: TokenizerAndRendererExtension = {
+	name: "obsidianEmbed",
+	level: "inline",
+	start(src) {
+		const i = src.indexOf("![[");
+		return i < 0 ? undefined : i;
+	},
+	tokenizer(src) {
+		const m = stickyExec(EMBED, src, 0);
+		return m ? ({ type: "obsidianEmbed", raw: m[0], text: m[1].trim() } satisfies EmbedToken) : undefined;
+	},
+	renderer(token) {
+		return embedHtml((token as EmbedToken).text);
+	},
+};
+
 interface MathToken {
 	type: "blockMath" | "inlineMath";
 	raw: string;
@@ -185,7 +233,7 @@ const marked = new Marked(
 			},
 		},
 	},
-	{ extensions: [blockMath, inlineMath] },
+	{ extensions: [blockMath, inlineMath, obsidianEmbed] },
 );
 
 export function escapeHtml(text: string): string {
@@ -228,24 +276,45 @@ export function renderMath(text: string, display: boolean): string {
 }
 
 /**
- * Plain text with only its math rendered: no markdown, everything else
- * escaped. Line breaks come from the container's `white-space: pre-wrap`, so
- * the newline next to a display formula is dropped, or it would show as a
- * blank line beside the block.
+ * Plain text with only its math (and Obsidian embeds) rendered: no markdown,
+ * everything else escaped. Line breaks come from the container's
+ * `white-space: pre-wrap`, so the newline next to a display formula is
+ * dropped, or it would show as a blank line beside the block.
  */
 export function renderMathText(source: string): string {
-	const spans = findMath(source);
-	if (!spans.length) return escapeHtml(source);
+	const pieces = findMath(source).map((s) => ({ start: s.start, end: s.end, html: mathHtml(s.text, s.display), block: s.display }));
+	const embed = new RegExp(EMBED.source, "g");
+	for (let m = embed.exec(source); m; m = embed.exec(source)) {
+		const start = m.index;
+		const end = start + m[0].length;
+		if (!pieces.some((p) => start < p.end && end > p.start)) pieces.push({ start, end, html: embedHtml(m[1].trim()), block: false });
+	}
+	if (!pieces.length) return escapeHtml(source);
+	pieces.sort((a, b) => a.start - b.start);
 	let html = "";
 	let last = 0;
-	for (const span of spans) {
-		let before = source.slice(last, span.start);
-		if (span.display && before.endsWith("\n")) before = before.slice(0, -1);
-		html += escapeHtml(before) + mathHtml(span.text, span.display);
-		last = span.end;
-		if (span.display && source[last] === "\n") last++;
+	for (const piece of pieces) {
+		let before = source.slice(last, piece.start);
+		if (piece.block && before.endsWith("\n")) before = before.slice(0, -1);
+		html += escapeHtml(before) + piece.html;
+		last = piece.end;
+		if (piece.block && source[last] === "\n") last++;
 	}
 	return sanitize(html + escapeHtml(source.slice(last)));
+}
+
+/** The user's own message: a document when it is written as one, otherwise verbatim text with its formulas. */
+export function renderUserText(text: string): { html: string; markdown: boolean } {
+	const markdown = looksLikeMarkdown(text);
+	return { markdown, html: markdown ? renderMarkdown(text) : renderMathText(text) };
+}
+
+/** A whole draft as a document, for the composer preview: a display block still being typed is closed for the preview only. */
+export function renderDraft(text: string): string {
+	const spans = findMath(text, true);
+	const last = spans[spans.length - 1];
+	if (last?.open) text += text.startsWith("$$", last.start) ? "\n$$" : "\\]";
+	return renderMarkdown(text);
 }
 
 /** Code-copy buttons, LaTeX copy and external links, wired once on a container. */

@@ -29,7 +29,16 @@ import type { Settings } from "../store";
 import { diffStats, renderDiff } from "../ui/diff";
 import { basename, h, svg } from "../ui/dom";
 import { type IconName, icons } from "../ui/icons";
-import { findMath, renderMarkdown, renderMath, renderMathText, wireMarkdown } from "../ui/markdown";
+import {
+	findMath,
+	looksLikeMarkdown,
+	type MathSpan,
+	renderDraft,
+	renderMarkdown,
+	renderMath,
+	renderUserText,
+	wireMarkdown,
+} from "../ui/markdown";
 import { keys } from "../ui/platform";
 
 export interface ChatHost {
@@ -183,6 +192,8 @@ export class ChatView {
 	private readonly queue: string[] = [];
 	private slashIndex = 0;
 	private previewTimer: number | null = null;
+	/** Composer preview: chips per formula or the whole draft as a document; "off" lasts until the input is cleared. */
+	private previewMode: "auto" | "chips" | "doc" | "off" = "auto";
 	private stickToBottom = true;
 	private renderScheduled = false;
 	private turnStarted = 0;
@@ -756,20 +767,47 @@ export class ChatView {
 		this.markContent();
 		if (!this.userBubble) {
 			const body = h("div", { class: "bubble-body" });
-			const el = h("div", { class: "msg msg-user" }, h("div", { class: "bubble" }, body));
+			const raw = h("button", { class: "bubble-raw hidden", type: "button", title: "보낸 그대로 보기" }, "원문");
+			const el = h("div", { class: "msg msg-user" }, raw, h("div", { class: "bubble" }, body));
+			const segment: TextSegment = { el, body, text: "", dirty: false };
+			raw.addEventListener("click", () => {
+				el.classList.toggle("raw");
+				this.renderUserBubble(segment);
+			});
 			this.log.appendChild(el);
-			this.userBubble = { el, body, text: "", dirty: false };
+			this.userBubble = segment;
 		}
 		if (content.type === "text") {
 			this.userBubble.text += content.text;
-			// Own text, so no markdown: only its formulas are rendered, the rest stays verbatim.
-			this.userBubble.body.innerHTML = renderMathText(this.userBubble.text);
+			this.renderUserBubble(this.userBubble);
 		} else if (content.type === "image") {
 			this.userBubble.body.appendChild(
 				h("img", { class: "bubble-img", src: `data:${content.mimeType};base64,${content.data}`, alt: "첨부 이미지" }),
 			);
 		}
 		this.scrollToBottom();
+	}
+
+	/**
+	 * Own text is a document when written as one (headings, lists, tables…),
+	 * otherwise verbatim with its formulas; "원문" shows it exactly as sent.
+	 * Attached images sit after the text and survive a re-render.
+	 */
+	private renderUserBubble(segment: TextSegment): void {
+		const { el, body, text } = segment;
+		const images = [...body.querySelectorAll("img.bubble-img")];
+		const raw = el.classList.contains("raw");
+		const { html, markdown } = raw ? { html: "", markdown: false } : renderUserText(text);
+		body.className = `bubble-body${markdown ? " md" : ""}`;
+		body.parentElement?.classList.toggle("doc", markdown);
+		if (raw) body.textContent = text;
+		else body.innerHTML = html;
+		body.append(...images);
+		const button = el.querySelector<HTMLButtonElement>(".bubble-raw");
+		if (button) {
+			button.textContent = raw ? "렌더링" : "원문";
+			button.classList.toggle("hidden", !raw && !looksLikeMarkdown(text) && !findMath(text).length);
+		}
 	}
 
 	private appendText(kind: "message" | "thought", text: string): void {
@@ -1098,27 +1136,45 @@ export class ChatView {
 
 	// ------------------------------------------------------- math preview
 
-	/** Coalesces a burst of keystrokes into one render; formulas themselves come from the KaTeX cache. */
+	/** Coalesces a burst of keystrokes into one render; formulas themselves come from the KaTeX cache. A long document gets a little more slack. */
 	private schedulePreview(): void {
 		if (this.previewTimer !== null) return;
-		this.previewTimer = window.setTimeout(() => {
-			this.previewTimer = null;
-			this.renderMathPreview();
-		}, 80);
+		this.previewTimer = window.setTimeout(
+			() => {
+				this.previewTimer = null;
+				this.renderMathPreview();
+			},
+			this.input.value.length > 4000 ? 160 : 80,
+		);
 	}
 
 	private renderMathPreview(): void {
 		const value = this.input.value;
+		if (!value) this.previewMode = "auto";
+		const enabled = this.host.settings().mathPreview && this.previewMode !== "off";
 		// Lenient: a $$ or \[ block still being typed shows up as it grows.
-		const spans =
-			this.host.settings().mathPreview && /[$\\]/.test(value) ? findMath(value, true).filter((s) => s.text) : [];
-		if (!spans.length) {
+		const spans = enabled && /[$\\]/.test(value) ? findMath(value, true).filter((s) => s.text) : [];
+		const markdown = enabled && looksLikeMarkdown(value);
+		// A document, or more formulas than chips can show at a glance, previews whole.
+		const doc = this.previewMode === "doc" || (this.previewMode === "auto" && (markdown || spans.length > 6));
+		if (!enabled || (doc ? !spans.length && !markdown : !spans.length)) {
 			this.mathPreview.classList.add("hidden");
 			this.mathPreview.replaceChildren();
 			return;
 		}
 		const caret = this.input.selectionStart;
+		const bar = this.previewBar(doc);
+		if (doc) {
+			const body = h("div", { class: "md math-doc" });
+			body.innerHTML = renderDraft(value);
+			this.mathPreview.replaceChildren(bar, body);
+			this.mathPreview.classList.add("doc");
+			this.mathPreview.classList.remove("hidden");
+			this.followCaret(body, value, caret, spans);
+			return;
+		}
 		this.mathPreview.replaceChildren(
+			bar,
 			...spans.map((span) => {
 				const active = caret >= span.start && caret <= span.end;
 				const chip = h("span", {
@@ -1128,10 +1184,75 @@ export class ChatView {
 				return chip;
 			}),
 		);
+		this.mathPreview.classList.remove("doc");
 		this.mathPreview.classList.remove("hidden");
 		if (this.mathPreview.scrollHeight > this.mathPreview.clientHeight) {
 			this.mathPreview.querySelector(".active")?.scrollIntoView({ block: "nearest" });
 		}
+	}
+
+	/** 수식 · 문서 · × at the strip's corner. mousedown, so the textarea keeps focus and the caret. */
+	private previewBar(doc: boolean): HTMLElement {
+		const button = (label: string, mode: "chips" | "doc" | "off", active: boolean, title: string) =>
+			h(
+				"button",
+				{
+					class: `preview-mode${active ? " active" : ""}`,
+					type: "button",
+					title,
+					onmousedown: (event: Event) => {
+						event.preventDefault();
+						this.previewMode = mode;
+						this.renderMathPreview();
+					},
+				},
+				label,
+			);
+		return h(
+			"div",
+			{ class: "preview-bar" },
+			button("수식", "chips", !doc, "수식만 칩으로 보기"),
+			button("문서", "doc", doc, "전체를 문서로 보기"),
+			button("×", "off", false, "이 메시지에서는 미리보기 숨기기"),
+		);
+	}
+
+	/**
+	 * Keep the document preview near where the caret is: the formula under the
+	 * caret, else the last heading above it, else the same fraction of the way
+	 * down. Scrolls the strip itself, never the page.
+	 */
+	private followCaret(body: HTMLElement, value: string, caret: number, spans: MathSpan[]): void {
+		const box = this.mathPreview;
+		const scrollable = box.scrollHeight > box.clientHeight;
+		// Rect-based, so a formula inside a table cell (whose offsetParent is the table) works too.
+		const scrollTo = (el: HTMLElement, center: boolean) => {
+			const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
+			box.scrollTop = Math.max(0, top - (center ? box.clientHeight / 2 : 10));
+		};
+		const i = spans.findIndex((s) => caret >= s.start && caret <= s.end);
+		if (i >= 0) {
+			const formulas = [...body.querySelectorAll<HTMLElement>("[data-tex]")];
+			const target =
+				formulas[i]?.dataset.tex === spans[i].text ? formulas[i] : formulas.find((f) => f.dataset.tex === spans[i].text);
+			if (target) {
+				target.classList.add("active");
+				if (scrollable) scrollTo(target, true);
+				return;
+			}
+		}
+		if (!scrollable) return;
+		const headings = [...value.slice(0, caret).matchAll(/^ {0,3}#{1,6} +(.+?)\s*#*[ \t]*$/gm)];
+		if (headings.length) {
+			const plain = (s: string) => s.replace(/[*`$_\\{}]/g, "").replace(/\s+/g, " ").trim();
+			const want = plain(headings[headings.length - 1][1]);
+			const heading = [...body.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6")].find((el) => plain(el.textContent ?? "") === want);
+			if (heading) {
+				scrollTo(heading, false);
+				return;
+			}
+		}
+		box.scrollTop = (caret / Math.max(1, value.length)) * (box.scrollHeight - box.clientHeight);
 	}
 
 	/** Wrap the selection in $…$ (or a $$ block when asked, or when it spans lines); an empty selection gets the caret inside. */
