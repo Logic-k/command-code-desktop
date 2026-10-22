@@ -2199,3 +2199,35 @@ dialog {
 	max-height: 92vh;
 	overflow-y: auto;
 }
+
+/* ------------------------------------------------------------------ math */
+
+.md .math-display {
+	display: block;
+	margin: 0.6em 0 0.9em;
+	padding: 4px 2px;
+	overflow-x: auto;
+	overflow-y: hidden;
+	text-align: center;
+}
+.md .math-display .katex-display {
+	margin: 0;
+}
+.md .katex {
+	font-size: 1.08em;
+	color: var(--fg);
+}
+.md .math-inline,
+.md .math-block {
+	border-radius: 4px;
+	transition: background 0.2s;
+}
+.md .copied {
+	background: var(--accent-soft);
+}
+/* KaTeX shows a formula it cannot parse in its source, in red; keep it readable. */
+.md .katex-error {
+	color: var(--danger) !important;
+	font-family: var(--mono);
+	font-size: 0.9em;
+}
