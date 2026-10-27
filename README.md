@@ -103,6 +103,8 @@ Command Code CLI를 GUI 앱처럼 쓰는 Windows 데스크톱 앱입니다 (Taur
 
 필요: Node 22+, Rust stable, pnpm, 그리고 설치·로그인된 Command Code CLI (`npm i -g command-code`, `cmd login`).
 
+**설치 파일로 받은 컴퓨터에 CLI가 없으면** 첫 실행 때 "처음 설정"이 뜹니다. **자동 설치**를 누르면 nodejs.org의 Node.js LTS(체크섬 확인)와 npm의 `command-code`를 앱 데이터 폴더(`%LOCALAPPDATA%\ai.commandcode.cmdcgui\runtime`, 맥은 `~/Library/Application Support/ai.commandcode.cmdcgui/runtime`)에 받고, 이어서 브라우저 로그인으로 넘어갑니다. 시스템에는 아무것도 설치하지 않고 관리자 권한도 필요 없습니다. 직접 설치한 CLI가 있으면 그쪽을 먼저 씁니다. 나중에 다시 열려면 왼쪽 아래 버전 → **처음 설정**.
+
 ```bash
 pnpm install
 pnpm tauri dev
@@ -136,7 +138,7 @@ cmdc-gui.exe D:\project
 xattr -dr com.apple.quarantine "/Applications/Command Code Desktop.app"
 ```
 
-**필요한 것**: Node 22 이상, `npm i -g command-code`, 그리고 터미널에서 `cmdc login` 한 번. Homebrew, nvm, volta로 설치한 node도 찾습니다(앱이 로그인 셸의 PATH를 읽음).
+**필요한 것**: 없으면 첫 실행의 "처음 설정"이 Node와 CLI를 앱 전용으로 받고 로그인까지 이어 줍니다. 직접 설치해 둔 Node 22 이상과 `npm i -g command-code`가 있으면 그것을 씁니다. Homebrew, nvm, volta로 설치한 node도 찾습니다(앱이 로그인 셸의 PATH를 읽음).
 
 **맥에서 다른 점**
 - 단축키는 Ctrl 대신 ⌘ (예: ⌘N 새 채팅, ⌘W 탭 닫기). 터미널 탭에서는 ⌘C/⌘V가 복사·붙여넣기이고, Ctrl은 터미널 그대로입니다.

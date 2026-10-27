@@ -4,6 +4,7 @@ pub mod billing;
 pub mod launch;
 pub mod procs;
 pub mod pty;
+pub mod setup;
 pub mod updates;
 
 use acp::AcpManager;
@@ -39,6 +40,10 @@ pub fn run() {
         .manage(accounts::PendingLogins::default())
         .manage(updates::UpdateBuild::default())
         .setup(|app| {
+            // Before anything resolves the CLI: the app-private install lives here.
+            if let Some(dir) = setup::runtime_root(app.handle()) {
+                launch::set_runtime_dir(dir);
+            }
             accounts::start(app.handle());
             updates::start_version_watch(app.handle());
             Ok(())
@@ -56,6 +61,8 @@ pub fn run() {
             updates::app_update_apply,
             updates::cli_update,
             updates::cli_compat,
+            setup::setup_status,
+            setup::setup_install,
             launch::cmdc_launch,
             launch::start_dir,
             launch::dir_exists,

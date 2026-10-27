@@ -31,6 +31,7 @@ tauri-plugin-window-state = "2"
 tauri-plugin-single-instance = "2"
 keyring = { version = "3", features = ["windows-native", "apple-native"] }
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+sha2 = "0.10"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

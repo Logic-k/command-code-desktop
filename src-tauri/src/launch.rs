@@ -8,8 +8,13 @@
 //!   layout is unexpected we fall back to the shim through `%COMSPEC%`.
 //! * macOS/Linux: `cmdc` is a symlink into the package; following it gives the
 //!   entry. The fallback runs `cmdc` itself (its `#!/usr/bin/env node` line).
+//!
+//! A CLI the user installed comes first. Without one, the app-private install
+//! the first-run setup makes (`setup.rs`: `<runtime>/node` and the npm prefix
+//! `<runtime>/cli`) is used, and its Node goes first on the child's PATH.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::Serialize;
 
@@ -26,6 +31,74 @@ pub struct Launch {
     pub entry: Option<String>,
     /// The installed `command-code` version, when known.
     pub version: Option<String>,
+}
+
+static RUNTIME_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Where the app-private Node and CLI live; set once at startup.
+pub fn set_runtime_dir(dir: PathBuf) {
+    let _ = RUNTIME_DIR.set(dir);
+}
+
+pub fn runtime_dir() -> Option<&'static Path> {
+    RUNTIME_DIR.get().map(PathBuf::as_path)
+}
+
+/// The unpacked Node archive: `node.exe` sits at its root on Windows and in
+/// `bin/` elsewhere.
+pub fn private_node_dir() -> Option<PathBuf> {
+    let node = runtime_dir()?.join("node");
+    Some(if cfg!(windows) { node } else { node.join("bin") })
+}
+
+pub fn private_node() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "node.exe" } else { "node" };
+    private_node_dir().map(|dir| dir.join(name)).filter(|p| p.is_file())
+}
+
+/// npm's global layout under `--prefix`: bins at the root and packages in
+/// `node_modules` on Windows; `bin/` and `lib/node_modules` elsewhere.
+fn private_cli_bin_dir() -> Option<PathBuf> {
+    let cli = runtime_dir()?.join("cli");
+    Some(if cfg!(windows) { cli } else { cli.join("bin") })
+}
+
+fn private_entry() -> Option<PathBuf> {
+    let cli = runtime_dir()?.join("cli");
+    let modules = if cfg!(windows) { cli.join("node_modules") } else { cli.join("lib").join("node_modules") };
+    Some(modules.join("command-code").join("dist").join("index.mjs")).filter(|p| p.is_file())
+}
+
+fn private_launch() -> Option<Launch> {
+    let node = private_node()?;
+    Some(node_launch(node.to_string_lossy().into_owned(), &private_entry()?))
+}
+
+/// Whether `launch` runs the app-private CLI.
+pub fn is_private(launch: &Launch) -> bool {
+    let (Some(entry), Some(root)) = (launch.entry.as_deref(), runtime_dir()) else {
+        return false;
+    };
+    Path::new(entry).starts_with(root)
+}
+
+/// Whether any CLI can be started: a resolved entry, or at least a `cmdc` shim.
+pub fn cli_installed(launch: &Launch) -> bool {
+    launch.entry.is_some() || find_on_path(if cfg!(windows) { "cmdc.cmd" } else { "cmdc" }).is_some()
+}
+
+/// The app-private Node and CLI bins, for the front of a child's PATH.
+pub fn private_path_dirs() -> Vec<PathBuf> {
+    [private_node_dir(), private_cli_bin_dir()].into_iter().flatten().collect()
+}
+
+/// `current` with `dirs` put in front.
+pub fn prepend_path(dirs: &[PathBuf], current: Option<&str>) -> Option<String> {
+    let mut parts = dirs.to_vec();
+    if let Some(current) = current {
+        parts.extend(std::env::split_paths(current));
+    }
+    std::env::join_paths(parts).ok().map(|p| p.to_string_lossy().into_owned())
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
@@ -76,6 +149,11 @@ pub fn resolve_launch() -> Launch {
             return node_launch(node, &entry);
         }
     }
+    if shim.is_none() {
+        if let Some(launch) = private_launch() {
+            return launch;
+        }
+    }
 
     Launch {
         program: std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
@@ -90,6 +168,9 @@ pub fn resolve_launch() -> Launch {
 #[cfg(not(windows))]
 pub fn resolve_launch() -> Launch {
     let Some(bin) = find_on_path("cmdc") else {
+        if let Some(launch) = private_launch() {
+            return launch;
+        }
         return Launch {
             program: "cmdc".to_string(),
             prefix_args: Vec::new(),
@@ -179,9 +260,25 @@ pub fn adopt_login_shell_path() {
 ///   writes into a throwaway home.
 /// * `account_id` picks a saved account: its key goes in as
 ///   `COMMAND_CODE_API_KEY`, which the CLI prefers over `auth.json`.
+/// * the app-private CLI gets its Node first on PATH (for the shell commands it
+///   runs) and npm's global prefix pointed at its own install, so `cmd update`
+///   updates that copy.
 pub fn child_env(profile_dir: Option<&str>, account_id: Option<&str>) -> Result<Vec<(String, String)>, String> {
     let mut env: Vec<(String, String)> = std::env::vars().collect();
     env.push(("CMDC_GUI".into(), "1".into()));
+    if is_private(&resolve_launch()) {
+        // Windows spells it `Path`; replace that entry rather than add a second.
+        let index = env.iter().position(|(k, _)| k.eq_ignore_ascii_case("PATH"));
+        if let Some(path) = prepend_path(&private_path_dirs(), index.map(|i| env[i].1.as_str())) {
+            match index {
+                Some(i) => env[i].1 = path,
+                None => env.push(("PATH".into(), path)),
+            }
+        }
+        if let Some(root) = runtime_dir() {
+            env.push(("npm_config_prefix".into(), root.join("cli").to_string_lossy().into_owned()));
+        }
+    }
     if let Some(dir) = profile_dir.filter(|d| !d.is_empty()) {
         env.push(("USERPROFILE".into(), dir.into()));
         env.push(("HOME".into(), dir.into()));

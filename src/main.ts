@@ -945,6 +945,7 @@ void listen("accounts://changed", async () => {
 		closeLoginTab(cliLoginTab);
 		cliLoginTab = null;
 	}
+	renderSetup?.();
 	const moved = activeAccountId() === null ? applyAccountToTabs(null, true) : 0;
 	const what = !cliUser
 		? "CLI에서 로그아웃했습니다"
@@ -1576,6 +1577,7 @@ function openUpdates(): void {
 					{ class: "row" },
 					cliBtn,
 					h("button", { class: "btn ghost", type: "button", onclick: () => void openUrl("https://commandcode.ai/changelog") }, "변경 내역"),
+					h("button", { class: "btn ghost", type: "button", onclick: () => void openSetup() }, "처음 설정"),
 				),
 			),
 			h(
@@ -1607,6 +1609,143 @@ function openUpdates(): void {
 	void runCompat();
 }
 
+// ---------------------------------------------------------- first run
+//
+// Machines without the CLI get an app-private Node and CLI (src-tauri/src/
+// setup.rs): nothing system-wide, no admin rights. Then `cmd login`.
+
+/** Mirrors `setup::SetupStatus` in src-tauri/src/setup.rs. */
+interface SetupStatus {
+	cliInstalled: boolean;
+	cliVersion: string | null;
+	cliSource: "system" | "app" | null;
+	appNode: string | null;
+	runtimeDir: string | null;
+}
+
+let renderSetup: (() => void) | null = null;
+
+function needsSetup(status: SetupStatus | null): boolean {
+	return !status?.cliInstalled || (!cliUser && accounts.length === 0);
+}
+
+async function openSetup(): Promise<void> {
+	let status = await invoke<SetupStatus>("setup_status").catch(() => null);
+	let phase: "idle" | "installing" | "failed" = "idle";
+	let error: string | null = null;
+	const lines: string[] = [];
+	const steps = h("div", { class: "compat-list" });
+	const note = h("div", { class: "muted small" });
+	const log = h("pre", { class: "update-log hidden" });
+	const primary = h("button", { class: "btn primary", type: "button" });
+	const recheck = h("button", { class: "btn", type: "button" }, "다시 확인");
+
+	const row = (ok: boolean, name: string, detail: string) =>
+		h(
+			"div",
+			{ class: `compat-row${ok ? "" : " bad"}` },
+			h("span", { class: "compat-mark" }, ok ? "✓" : "·"),
+			h("span", { class: "compat-name" }, name),
+			h("span", { class: "compat-detail" }, detail),
+		);
+
+	const render = () => {
+		const installed = Boolean(status?.cliInstalled);
+		const loggedIn = Boolean(cliUser || accounts.length);
+		const systemCli = installed && status?.cliSource === "system";
+		steps.replaceChildren(
+			row(
+				systemCli || Boolean(status?.appNode),
+				"Node.js",
+				systemCli ? "필요 없음 · 직접 설치한 CLI를 씁니다" : status?.appNode ? `${status.appNode} · 앱 전용` : "없음 · 앱 전용으로 받습니다",
+			),
+			row(
+				installed,
+				"Command Code CLI",
+				installed
+					? `${status?.cliVersion ?? "버전 모름"} · ${status?.cliSource === "app" ? "앱 전용" : "직접 설치한 것"}`
+					: "없음 · npm에서 받습니다",
+			),
+			row(loggedIn, "로그인", loggedIn ? (cliUser ?? accounts[0]?.userName ?? "") : "브라우저에서 한 번 로그인합니다"),
+		);
+		note.textContent = installed
+			? ""
+			: `nodejs.org에서 Node.js LTS(약 35MB, 체크섬 확인)를, npm에서 command-code를 받아 ${status?.runtimeDir ?? "앱 데이터 폴더"}에 둡니다. 시스템에는 아무것도 설치하지 않고 관리자 권한도 필요 없습니다.`;
+		log.classList.toggle("hidden", lines.length === 0 && !error);
+		log.textContent = [...lines.slice(-200), ...(error ? [`[실패] ${error}`] : [])].join("\n");
+		log.scrollTop = log.scrollHeight;
+		primary.textContent =
+			phase === "installing" ? "설치 중…" : !installed ? (phase === "failed" ? "다시 시도" : "자동 설치") : !loggedIn ? "브라우저로 로그인" : "시작하기";
+		primary.disabled = phase === "installing";
+		recheck.disabled = phase === "installing";
+	};
+
+	const install = async () => {
+		phase = "installing";
+		error = null;
+		lines.length = 0;
+		render();
+		const channel = new Channel<string>();
+		channel.onmessage = (line) => {
+			lines.push(line);
+			render();
+		};
+		try {
+			status = await invoke<SetupStatus>("setup_install", { onLog: channel });
+			phase = "idle";
+			cliCurrent = status.cliVersion;
+			renderVersionLabel();
+			toast(`Command Code CLI ${status.cliVersion ?? ""} 설치 완료`, "ok");
+		} catch (e) {
+			phase = "failed";
+			error = String(e);
+		}
+		render();
+	};
+
+	primary.addEventListener("click", () => {
+		if (!status?.cliInstalled) void install();
+		else if (!cliUser && !accounts.length) {
+			settingsEl.close();
+			void cliLogin();
+		} else settingsEl.close();
+	});
+	recheck.addEventListener("click", async () => {
+		status = await invoke<SetupStatus>("setup_status").catch(() => status);
+		await refreshAccounts();
+		render();
+	});
+
+	settingsEl.replaceChildren(
+		h(
+			"div",
+			{ class: "settings" },
+			h("h2", null, "처음 설정"),
+			h("p", { class: "muted" }, "이 앱은 Command Code CLI로 동작합니다. 없으면 앱 안에 따로 설치하고, 로그인까지 이어서 합니다."),
+			steps,
+			note,
+			log,
+			h(
+				"div",
+				{ class: "settings-actions" },
+				h("button", { class: "btn ghost", type: "button", onclick: () => settingsEl.close() }, "나중에"),
+				recheck,
+				primary,
+			),
+		),
+	);
+	renderSetup = render;
+	settingsEl.addEventListener(
+		"close",
+		() => {
+			if (renderSetup === render) renderSetup = null;
+		},
+		{ once: true },
+	);
+	render();
+	if (!settingsEl.open) settingsEl.showModal();
+}
+
 // The CLI updated itself (or was updated from here): new agents already use
 // it; move running chats over too, and re-check what the app relies on.
 void listen<{ from: string | null; to: string | null }>("cli://version", async (event) => {
@@ -1625,7 +1764,9 @@ void listen<{ from: string | null; to: string | null }>("cli://version", async (
 	const checks = await runCompat();
 	const broken = checks.filter((c) => !c.ok);
 	toast(
-		`Command Code CLI가 ${from ?? "?"} → ${to ?? "?"}(으)로 업데이트됐습니다${moved ? ` · 대화 ${moved}개를 새 버전으로 다시 연결` : ""}`,
+		from
+			? `Command Code CLI가 ${from} → ${to ?? "?"}(으)로 업데이트됐습니다${moved ? ` · 대화 ${moved}개를 새 버전으로 다시 연결` : ""}`
+			: `Command Code CLI ${to ?? ""}이(가) 설치됐습니다`,
 		broken.length ? "error" : "ok",
 		10_000,
 		broken.length ? { label: `호환성 문제 ${broken.length}건 보기`, run: () => void openUpdates() } : undefined,
@@ -1793,7 +1934,7 @@ void appWindow.onDragDropEvent(async (event) => {
 // Dev builds expose the shell for driving the UI over the WebView2 debug port.
 if (import.meta.env.DEV) {
 	Object.assign(window, {
-		__cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal, closeTab, refreshAccounts, switchAccount, addAccount, cliLogin, openModelsDialog, openUpdates, accessFor, loadBilling, billingCache, reportLimit, runCompat, renderGauge },
+		__cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal, closeTab, refreshAccounts, switchAccount, addAccount, cliLogin, openModelsDialog, openUpdates, openSetup, accessFor, loadBilling, billingCache, reportLimit, runCompat, renderGauge },
 	});
 }
 
@@ -1824,6 +1965,10 @@ void (async () => {
 	setTimeout(() => void checkUpdates(true).then(() => runCompat()), 20_000);
 	renderGauge();
 	void loadCatalog().then(() => loadAllBilling());
+
+	// No CLI or no login yet (a new machine): walk through setup first.
+	const setup = await invoke<SetupStatus>("setup_status").catch(() => null);
+	if (needsSetup(setup)) void openSetup();
 
 	// A folder from the command line (or CMDC_GUI_START_DIR) opens straight
 	// into a chat, which makes the app scriptable from a shortcut.
