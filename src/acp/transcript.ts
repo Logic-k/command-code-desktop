@@ -32,6 +32,11 @@ const KIND: Record<string, ToolKind> = {
 	plan_review: "think",
 	ask_user_question: "think",
 	task: "other",
+	agent: "other",
+	ulw_plan: "think",
+	ulw_node: "think",
+	ulw_verify: "think",
+	ulw_status: "think",
 };
 
 const TITLE: Record<string, { label: string; key?: string }> = {
@@ -51,6 +56,11 @@ const TITLE: Record<string, { label: string; key?: string }> = {
 	get_diagnostics: { label: "Diagnostics" },
 	run_command: { label: "Command", key: "command" },
 	task: { label: "Agent", key: "description" },
+	agent: { label: "Agent", key: "description" },
+	ulw_plan: { label: "ULW plan" },
+	ulw_node: { label: "ULW node", key: "id" },
+	ulw_verify: { label: "ULW verify" },
+	ulw_status: { label: "ULW status" },
 };
 
 interface RawBlock {

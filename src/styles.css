@@ -1542,6 +1542,230 @@ kbd {
 	font-weight: 600;
 }
 
+/* ultrawork DAG */
+.chip-ulw {
+	font-family: var(--mono);
+	font-size: 11.5px;
+	padding: 2px 9px;
+}
+.chip-ulw .dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--accent);
+	flex: none;
+}
+.chip-ulw.ok .dot {
+	background: var(--ok);
+}
+.chip-ulw.failed .dot {
+	background: var(--danger);
+}
+
+.dag {
+	display: flex;
+	flex-direction: column;
+	flex: none;
+	border-bottom: 1px solid var(--border);
+	background: var(--bg-panel);
+}
+.dag-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	min-width: 0;
+	padding: 7px 16px;
+	border: 0;
+	background: none;
+	color: var(--fg);
+	text-align: left;
+	cursor: pointer;
+	font: inherit;
+}
+.dag-head:hover {
+	background: var(--bg-hover);
+}
+.dag-head > .icon {
+	display: inline-flex;
+	color: var(--accent);
+}
+.dag-head > .icon svg {
+	width: 14px;
+	height: 14px;
+}
+.dag-title {
+	font-size: 11.5px;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+}
+.dag-phase {
+	font-size: 11px;
+	padding: 1px 8px;
+	border-radius: 999px;
+	background: var(--bg-elev);
+	color: var(--fg-dim);
+}
+.dag-phase.ok {
+	color: var(--ok);
+	background: var(--ok-soft);
+}
+.dag-count {
+	font-family: var(--mono);
+	font-size: 11.5px;
+	color: var(--fg-dim);
+}
+.dag-bar {
+	flex: 0 1 160px;
+	height: 4px;
+	border-radius: 2px;
+	background: var(--border);
+	overflow: hidden;
+}
+.dag-bar > span {
+	display: block;
+	height: 100%;
+	background: var(--accent);
+	transition: width 0.2s;
+}
+.dag.done .dag-bar > span {
+	background: var(--ok);
+}
+.dag-failed {
+	font-size: 11px;
+	color: var(--danger);
+}
+.dag-body {
+	max-height: min(40vh, 380px);
+	overflow: auto;
+	padding: 0 16px 12px;
+}
+.dag.collapsed .dag-body {
+	display: none;
+}
+.dag-objective {
+	padding: 2px 0 10px;
+	font-family: var(--mono);
+	font-size: 11.5px;
+	color: var(--fg-dim);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.dag-canvas {
+	position: relative;
+}
+.dag-edges {
+	position: absolute;
+	inset: 0;
+	overflow: visible;
+	pointer-events: none;
+}
+.dag-edge {
+	fill: none;
+	stroke: var(--border-strong);
+	stroke-width: 1.4;
+}
+.dag-edge.done {
+	stroke: var(--ok);
+}
+.dag-edge.active {
+	stroke: var(--accent);
+}
+.dag-edge.failed {
+	stroke: var(--danger);
+}
+.dag-node {
+	position: absolute;
+	box-sizing: border-box;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 8px 10px;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--bg);
+	overflow: hidden;
+	transition: border-color 0.15s, box-shadow 0.15s;
+}
+.dag-node.st-running {
+	border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.dag-node.st-done {
+	border-color: color-mix(in srgb, var(--ok) 42%, var(--border));
+}
+.dag-node.st-failed {
+	border-color: color-mix(in srgb, var(--danger) 48%, var(--border));
+}
+.dag-node-top {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+.dag-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--fg-faint);
+	flex: none;
+}
+.st-running .dag-dot {
+	background: var(--accent);
+	animation: dag-pulse 1.1s ease-in-out infinite;
+}
+.st-done .dag-dot {
+	background: var(--ok);
+}
+.st-failed .dag-dot {
+	background: var(--danger);
+}
+@keyframes dag-pulse {
+	50% {
+		opacity: 0.35;
+	}
+}
+.dag-id {
+	font-family: var(--mono);
+	font-size: 11.5px;
+	font-weight: 600;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.dag-role {
+	margin-left: auto;
+	font-family: var(--mono);
+	font-size: 9.5px;
+	color: var(--fg-faint);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	flex: none;
+}
+.dag-label {
+	font-size: 12px;
+	line-height: 1.35;
+	color: var(--fg);
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+.dag-note {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--fg-dim);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.dag-empty {
+	padding: 10px 0 2px;
+	font-size: 12.5px;
+	color: var(--fg-dim);
+}
+
 /* composer */
 .composer {
 	position: relative;

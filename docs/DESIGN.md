@@ -168,6 +168,23 @@ Rust는 **바이트 운반만** 한다. JSON-RPC 해석은 전부 TypeScript에�
   CLI가 바뀐 직후 자동으로 돌고, 업데이트 창에서 언제든 다시 돌릴 수 있다.
 - **업데이트 상태는 창 밖에 둔다.** 빌드 중에 업데이트 창을 닫아도 진행이 이어지고, 끝나면 "다시 시작해서 적용" 버튼이 붙은 알림이 뜬다.
 
+### ULTRAWORK DAG (v0.5)
+
+- **모드가 이미 그래프를 만든다.** 사용자의 `~/.commandcode/mods/ulw.ts`가 `mass ulw`/`ulw-loop` 키워드를
+  지시문으로 바꾸고, `ulw_plan`·`ulw_node`·`ulw_verify`·`ulw_status` 도구와 Stop 게이트를 제공한다.
+  ACP 슬래시 목록에도 `/mass-ulw`, `/ulw-loop`, `/mass-replica`, `/ulw`, `/ulw-status`, `/ulw-dag`,
+  `/ulw-reset`이 그대로 올라온다. 그래서 앱은 그래프를 **새로 실행하는** 코드가 아니라 **관찰하는** 코드만 필요하다.
+- **모드의 TUI 위젯은 ACP로 오지 않는다.** `cmd.ui.pane`·`widget`·`setStatus`는 터미널 화면용이고,
+  ACP로 `/ulw-status`를 보내면 텍스트 한 줄만 돌아온다(실측). 그래서 GUI는 `session/update`의 도구 호출에서
+  그래프를 다시 만든다: `ulw_plan`의 `rawInput.nodes`, `ulw_node`의 상태/메모, `ulw_verify`의 판정,
+  그리고 각 노드가 띄운 `agent` 호출(`subagent_type`·`description`)을 짝지어 상태를 옮긴다.
+- **백그라운드 에이전트는 도구 호출이 먼저 끝난다.** `run_in_background` 호출은 완료 이벤트가 와도 노드를
+  `running`으로 두고, 뒤따르는 `ulw_node`가 끝을 알린다. 포그라운드 호출은 완료 이벤트가 곧 노드 완료다.
+- **기록에서 복원된다.** 트랜스크립트의 `tool_use` 항목에 `name`과 `input`이 남으므로, 지난 대화를 열 때
+  같은 리듀서가 `ulw_plan`부터 순서대로 재생한다. 그래서 "지금 산 그래프"와 "어제 산 그래프"가 같은 화면으로 보인다.
+- **토큰 수는 ACP에 없다.** 서브에이전트 이벤트의 `tokensUsed`는 TUI 쪽 상태에만 쓰이고 `session/update`로
+  변환되지 않는다. 노드별 토큰을 보여 주려면 mod가 `ulw_node` 메모에 토큰을 적어 주는 방식이어야 한다.
+
 ## 6. 검증 기록 (2026-10-22)
 
 WebView2 디버그 포트(`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`)로 실제 앱 창을 CDP로 조작·캡처했다.
@@ -196,6 +213,7 @@ WebView2 디버그 포트(`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugg
 | (v0.4) CLI 버전 변경 감지 | 이벤트 → 열린 대화가 "CLI 1.87.1(으)로 다시 연결" 후 바로 사용 가능, 알림 표시 |
 | (v0.4) CLI 호환성 점검 (1.87.1) | 10개 항목 모두 통과 |
 | (v0.4) 앱에서 `cmd update --check-only` | 7.6초, "Up to date (1.87.1)" |
+| (v0.5) ULW DAG 리듀서 | `ulw_plan` 3노드 → 3열·간선 2, `agent` 역할 매칭/완료, 백그라운드 완료는 `running` 유지, `ulw_verify(false)`→검증·`true`→완료, 같은 plan의 완료 이벤트 무시; `pnpm build`(tsc+vite) 통과 |
 
 ## 7. 이후 단계 (v0.3+)
 

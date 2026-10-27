@@ -26,6 +26,7 @@ import type {
 } from "../acp/types";
 import { accountBlocker, type Billing, type Catalog, findModel, modelAccess } from "../billing";
 import type { Settings } from "../store";
+import { applyUlwTool, renderUlwCanvas, ulwToolKind, type UlwRun } from "../ui/dag";
 import { diffStats, renderDiff } from "../ui/diff";
 import { basename, h, svg } from "../ui/dom";
 import { type IconName, icons } from "../ui/icons";
@@ -173,6 +174,9 @@ export class ChatView {
 	private readonly welcome: HTMLElement;
 	private readonly banner: HTMLElement;
 	private readonly planBox: HTMLElement;
+	private readonly dagBox: HTMLElement;
+	private readonly dagBody: HTMLElement;
+	private readonly ulwChip: HTMLButtonElement;
 	private readonly input: HTMLTextAreaElement;
 	private readonly sendBtn: HTMLButtonElement;
 	private readonly mathBtn: HTMLButtonElement;
@@ -204,6 +208,9 @@ export class ChatView {
 	private planFromBypass = false;
 	private attachments: Attachment[] = [];
 	private readonly queue: string[] = [];
+	private ulw: UlwRun | null = null;
+	/** The user closed the graph; agent updates keep the panel closed until a new plan. */
+	private dagDismissed = false;
 	private slashIndex = 0;
 	private previewTimer: number | null = null;
 	/** Composer preview: chips per formula or the whole draft as a document; "off" lasts until the input is cleared. */
@@ -254,11 +261,18 @@ export class ChatView {
 			title: "이 대화가 쓰는 Command Code 계정. 사이드바에서 계정을 바꾸면 이 대화도 바로 따라갑니다.",
 		});
 		this.renderAccountChip();
+		this.ulwChip = h("button", {
+			class: "chip chip-ulw hidden",
+			type: "button",
+			title: "ULTRAWORK 실행 그래프 열기/닫기",
+			onclick: () => this.toggleDag(),
+		});
 		const head = h(
 			"header",
 			{ class: "chat-head" },
 			folderBtn,
 			this.accountChip,
+			this.ulwChip,
 			h("span", { class: "spacer" }),
 			this.modeSelect,
 			this.modelSelect,
@@ -283,6 +297,8 @@ export class ChatView {
 
 		this.banner = h("div", { class: "banner hidden" });
 		this.planBox = h("div", { class: "plan hidden" });
+		this.dagBody = h("div", { class: "dag-body" });
+		this.dagBox = h("section", { class: "dag hidden" });
 
 		this.input = h("textarea", {
 			class: "composer-input",
@@ -336,6 +352,7 @@ export class ChatView {
 			{ class: "chat" },
 			head,
 			this.banner,
+			this.dagBox,
 			h("div", { class: "chat-body" }, this.scroller, this.jumpBtn),
 			this.planBox,
 			composer,
@@ -943,6 +960,7 @@ export class ChatView {
 		}
 		if (!entry.open && data.status === "failed") entry.open = true;
 		this.renderTool(entry);
+		this.observeUlw(data);
 		this.scrollToBottom();
 	}
 
@@ -1224,6 +1242,102 @@ export class ChatView {
 			entries.map((entry) => h("li", { class: `plan-${entry.status}` }, entry.content)),
 		);
 		this.planBox.replaceChildren(head, list);
+	}
+
+	// ------------------------------------------------------------ ultrawork
+
+	/** A `ulw_plan` / `ulw_node` / `ulw_verify` / `agent` call changed the graph. */
+	private observeUlw(tool: ToolCall): void {
+		const kind = ulwToolKind(tool);
+		if (!kind) return;
+		const next = applyUlwTool(this.ulw, tool);
+		if (next === this.ulw) return;
+		this.ulw = next;
+		if (kind === "plan") {
+			this.dagDismissed = false;
+			this.dagBox.classList.remove("hidden", "collapsed");
+		} else if (kind === "verify" && !this.dagDismissed) {
+			this.dagBox.classList.remove("hidden");
+		}
+		this.renderDag();
+	}
+
+	private renderDag(): void {
+		const run = this.ulw;
+		if (!run) {
+			this.dagBox.classList.add("hidden");
+			this.ulwChip.classList.add("hidden");
+			return;
+		}
+		const total = run.nodes.length;
+		const done = run.nodes.filter((node) => node.status === "done").length;
+		const failed = run.nodes.filter((node) => node.status === "failed").length;
+		const phase = run.verifierPassed ? "검증 통과" : run.phase === "verify" ? "검증" : "실행";
+
+		this.ulwChip.classList.remove("hidden");
+		this.ulwChip.classList.toggle("ok", run.verifierPassed);
+		this.ulwChip.classList.toggle("failed", !run.verifierPassed && failed > 0);
+		this.ulwChip.replaceChildren(
+			h("span", { class: "dot" }),
+			run.verifierPassed ? "ULW 검증" : `ULW ${done}/${total}`,
+		);
+
+		this.dagBox.classList.toggle("done", run.verifierPassed);
+		this.dagBox.classList.toggle("failed", !run.verifierPassed && failed > 0);
+
+		const head = h(
+			"div",
+			{ class: "dag-head", onclick: () => this.dagBox.classList.toggle("collapsed") },
+			svg(icons.sparkle),
+			h("span", { class: "dag-title" }, "ULTRAWORK"),
+			h("span", { class: `dag-phase${run.verifierPassed ? " ok" : ""}` }, phase),
+			h("span", { class: "dag-count" }, `${done}/${total}`),
+			h(
+				"span",
+				{ class: "dag-bar" },
+				h("span", { style: `width:${total ? (done / total) * 100 : 0}%` }),
+			),
+			failed > 0 ? h("span", { class: "dag-failed" }, `${failed} 실패`) : null,
+			h("span", { class: "spacer" }),
+			h(
+				"button",
+				{
+					class: "icon-btn",
+					type: "button",
+					title: "그래프 닫기",
+					onclick: (event: Event) => {
+						event.stopPropagation();
+						this.dismissDag();
+					},
+				},
+				svg(icons.close),
+			),
+		);
+		const objective = h(
+			"div",
+			{ class: "dag-objective", title: run.objective },
+			run.objective || "(목표 없음)",
+		);
+		const left = this.dagBody.scrollLeft;
+		const top = this.dagBody.scrollTop;
+		this.dagBody.replaceChildren(objective, renderUlwCanvas(run));
+		this.dagBox.replaceChildren(head, this.dagBody);
+		this.dagBody.scrollLeft = left;
+		this.dagBody.scrollTop = top;
+	}
+
+	private toggleDag(): void {
+		if (this.dagBox.classList.contains("hidden")) {
+			this.dagBox.classList.remove("hidden", "collapsed");
+			this.dagDismissed = false;
+		} else {
+			this.dismissDag();
+		}
+	}
+
+	private dismissDag(): void {
+		this.dagBox.classList.add("hidden");
+		this.dagDismissed = true;
 	}
 
 	// ------------------------------------------------------------ composer
@@ -1662,6 +1776,7 @@ export class ChatView {
 			if (entry.data.status === "pending" || entry.data.status === "in_progress") {
 				entry.data.status = "cancelled" as ToolCall["status"];
 				this.renderTool(entry);
+				this.observeUlw(entry.data);
 			}
 		}
 		for (const pending of [...this.permissions]) pending.resolve({ outcome: "cancelled" });
