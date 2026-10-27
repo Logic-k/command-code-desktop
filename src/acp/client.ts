@@ -103,7 +103,7 @@ export class AcpConnection {
 		this.info = await this.request<InitializeResult>("initialize", {
 			protocolVersion: PROTOCOL_VERSION,
 			clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-			clientInfo: { name: "command-code-desktop", title: "Command Code Desktop", version: "0.4.0" },
+			clientInfo: { name: "command-code-desktop", title: "Command Code Desktop", version: "0.5.0" },
 		});
 	}
 
