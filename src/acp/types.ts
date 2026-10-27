@@ -102,6 +102,9 @@ export interface PermissionRequest {
 	sessionId: string;
 	toolCall: ToolCall;
 	options: PermissionOption[];
+	/** Set when the CLI flags the call as risky; it then offers no "always"
+	 * options and asks even in bypass mode. */
+	_meta?: { risk?: { kind: string; detail?: string } };
 }
 
 export type PermissionOutcome = { outcome: "selected"; optionId: string } | { outcome: "cancelled" };

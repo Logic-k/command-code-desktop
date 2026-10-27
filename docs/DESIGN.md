@@ -92,6 +92,14 @@ Rust는 **바이트 운반만** 한다. JSON-RPC 해석은 전부 TypeScript에�
 
 - 에이전트 출력은 모두 DOMPurify를 거친 뒤 렌더링한다(마크다운 안의 HTML·스크립트 차단).
 - 권한 모드 기본값은 `default`(매번 묻기). `bypass`는 빨간 경고와 함께만 선택 가능.
+- `bypass`에서도 CLI(1.88)는 `_meta.risk`가 붙은 요청(`destructive-command`, `outside-workspace`, `ask-rule`,
+  `permission-config`)과 `enter_plan_mode`는 묻는다. 위험 요청에는 "항상" 선택지가 없다. 앱은 이 모드에서 위험 표시 없는
+  요청은 바로, 위험 요청은 5초 카운트다운 뒤 `allow_once`로 답한다(멈출 수 있음, 모드를 바꾸면 멈춤).
+  `ask_user_question`은 옵션 id `option_N`, kind 전부 `allow_once`인 권한 요청으로 오므로 질문 카드로 따로 그린다. 이 모드에서는
+  질문도 같은 카운트다운 뒤 첫 번째 답을 고른다(CLI가 추천 답을 앞에 둔다. 계획 모드 질문이면 "Yes (Recommended)").
+  에이전트가 `bypass`에서 계획 모드로 들어가면(`current_mode_update`) 계획 승인 질문("Yes, auto-accept edits")도 같은 식으로
+  고르고, CLI는 승인 뒤 계획 전 모드인 `bypass`로 돌아간다. 사용자가 직접 고른 계획 모드는 자동으로 답하지 않는다.
+  `session/load`는 세션의 권한 모드를 그대로 돌려주므로(에이전트 재시작 뒤에도 `bypass` 유지 확인) 앱이 다시 걸 필요는 없다.
 - 클라이언트 측 `fs`/`terminal` 능력은 광고하지 않는다. 파일 접근은 CLI가 자기 권한 체계로 한다.
 - 계정 정보(`~/.commandcode/auth.json`)는 읽지도 복사하지도 않는다.
 
@@ -146,8 +154,13 @@ Rust는 **바이트 운반만** 한다. JSON-RPC 해석은 전부 TypeScript에�
 
 - **숫자는 CLI `/usage`와 같다.** 크레딧 응답(`monthlyCredits`, `purchasedCredits`, `freeCredits`, `windowLimits`)과 구독의
   `currentPeriodEnd`, 요금제별 기본 크레딧(CLI의 `Tr`: Go 10, GOAT 70, Pro 80, Max 150 …)으로
-  `사용률 = (기본+충전+보너스 − 잔액) ÷ (기본+충전+보너스)`. 5시간·주간 창은 서버가 `windowLimits`를 보낼 때만 그리고,
-  한도 오류(429, "resets at …")를 받으면 그 계정에 한도 도달 표시를 걸어 둔다.
+  `사용률 = (기본+충전+보너스 − 잔액) ÷ (기본+충전+보너스)`. 5시간·일간·주간 창은 서버가 `windowLimits`를 보낼 때만 그리고,
+  한도 오류(429, "resets at …")를 받으면 그 계정에 한도 도달 표시를 걸어 둔다. 게이지는 한도마다 이름을 붙인다
+  (`5시간 12% · 주간 86% · 월간 45%`): 이름 없는 퍼센트 하나로는 어느 창인지, 언제 풀리는지 알 수 없었다.
+  오류 메시지에 창 이름이 없으면 5시간으로 넘겨짚지 않고, 넘친 창 → 잔액 0이면 월간 → "사용" 순으로 정한다.
+- **`windowLimits`는 크레딧 응답의 최상위에 있다** (`{credits: {...}, windowLimits: {...}}`, CLI `projectUsageView`).
+  처음에 `credits` 안에서 찾느라 Go 요금제의 5시간·주간 한도가 늘 빠져 있었다. 각 창은 `{used, cap, resetAt(ms, 시작 전 0), exceeded}`,
+  최상위에 `limited`와 넘친 창 이름 `exceeded`가 온다. 넘친 창은 답변을 보내기 전에도 게이지에 "한도 도달"로 띄운다.
 - **CLI 업데이트 대응.** Rust가 15초마다 설치된 CLI 버전을 읽어 바뀌면 `cli://version`을 보낸다. 새 에이전트는 원래도 새 버전을
   쓰지만(실행할 때마다 설치 위치를 다시 읽음), 열린 대화는 계정 전환과 같은 재연결 경로로 새 버전에 붙인다.
 - **호환성 점검.** 앱이 기대는 CLI 내부 요소를 번들 문자열로 확인하고(`getCommandApiKeyFromEnv`, `session/request_permission`,

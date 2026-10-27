@@ -32,8 +32,9 @@ pub struct Billing {
     pub free_credits: f64,
     /// When the current billing period ends (ISO 8601), for "renews in N days".
     pub period_end: Option<String>,
-    /// Rolling-window limits (`{limited, fiveHour: {used, cap, resetAt}, weekly}`)
-    /// as the API sends them; present only while a plan has window limits.
+    /// Rolling-window limits (`{limited, fiveHour: {used, cap, resetAt}, weekly}`,
+    /// `resetAt` in epoch ms) as the API sends them, beside `credits` in the
+    /// credits response; present only while a plan has window limits.
     pub window_limits: Option<Value>,
 }
 
@@ -85,8 +86,8 @@ pub async fn account_billing(account_id: Option<String>) -> Result<Billing, Stri
             .and_then(Value::as_str)
             .map(str::to_string);
         let subs = get(&agent, &key, &with_org("/alpha/billing/subscriptions", org.as_deref()))?;
-        let credits = get(&agent, &key, &with_org("/alpha/billing/credits", org.as_deref()))?;
-        let credits = credits.get("credits").cloned().unwrap_or(Value::Null);
+        let body = get(&agent, &key, &with_org("/alpha/billing/credits", org.as_deref()))?;
+        let credits = body.get("credits").cloned().unwrap_or(Value::Null);
 
         let status = subs.pointer("/data/status").and_then(Value::as_str).map(str::to_string);
         let plan_id = subs
@@ -99,7 +100,13 @@ pub async fn account_billing(account_id: Option<String>) -> Result<Billing, Stri
             .pointer("/data/currentPeriodEnd")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let window_limits = credits.get("windowLimits").filter(|v| !v.is_null()).cloned();
+        // `windowLimits` sits next to `credits`, not inside it (the CLI's
+        // `projectUsageView` reads `credits.windowLimits` of the whole body).
+        let window_limits = body
+            .get("windowLimits")
+            .or_else(|| credits.get("windowLimits"))
+            .filter(|v| !v.is_null())
+            .cloned();
         Ok(Billing {
             user_name,
             plan_id,

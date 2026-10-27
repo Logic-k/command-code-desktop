@@ -116,6 +116,17 @@ const PERMISSION_LABEL: Record<string, string> = {
 	reject_always: "항상 거부",
 };
 
+/** `_meta.risk.kind` on a permission request (command-code 1.88). */
+const RISK_LABEL: Record<string, string> = {
+	"destructive-command": "되돌리기 어려운 삭제 명령",
+	"outside-workspace": "작업 폴더 밖 접근",
+	"ask-rule": "permissions.ask 규칙에 걸린 호출",
+	"permission-config": "권한 설정 변경",
+};
+
+/** In bypass mode, how long a risky request waits before the app allows it. */
+const BYPASS_COUNTDOWN_SECONDS = 5;
+
 const MODE_LABEL: Record<string, string> = {
 	default: "표준 (매번 확인)",
 	"auto-accept": "편집 자동 허용",
@@ -188,6 +199,9 @@ export class ChatView {
 	private modes: SessionMode[] = [];
 	private currentMode = "default";
 	private configOptions: ConfigOption[] = [];
+	/** The agent went into plan mode from bypass; approving the plan returns to
+	 * bypass, so its questions are answered as in bypass. */
+	private planFromBypass = false;
 	private attachments: Attachment[] = [];
 	private readonly queue: string[] = [];
 	private slashIndex = 0;
@@ -664,7 +678,7 @@ export class ChatView {
 		if (!this.sessionId || modeId === this.currentMode) return;
 		if (modeId === "bypass") {
 			const ok = await ask(
-				"모든 권한 확인을 건너뜁니다. 에이전트가 묻지 않고 파일을 지우거나 명령을 실행할 수 있습니다.\n\n이 대화에서만 켜시겠습니까?",
+				`모든 권한 확인을 건너뜁니다. 에이전트가 묻지 않고 파일을 지우거나 명령을 실행할 수 있습니다.\n\nCLI가 이 모드에서도 묻는 위험한 요청(작업 폴더 밖 삭제 등)은 ${BYPASS_COUNTDOWN_SECONDS}초 뒤 자동으로 허용하고, 에이전트의 질문은 ${BYPASS_COUNTDOWN_SECONDS}초 뒤 첫 번째 답을 고릅니다. 그 사이에 멈출 수 있습니다.\n\n이 대화에서만 켜시겠습니까?`,
 				{ title: "권한 무시 모드", kind: "warning", okLabel: "켜기", cancelLabel: "취소" },
 			);
 			if (!ok) {
@@ -675,6 +689,8 @@ export class ChatView {
 		try {
 			await this.connection.request("session/set_mode", { sessionId: this.sessionId, modeId });
 			this.currentMode = modeId;
+			// Plan mode the user picked is theirs to review, even coming from bypass.
+			this.planFromBypass = false;
 		} catch (error) {
 			this.flash(`모드 변경 실패: ${describeError(error)}`);
 		}
@@ -735,6 +751,8 @@ export class ChatView {
 				this.commands = update.availableCommands ?? [];
 				break;
 			case "current_mode_update":
+				this.planFromBypass =
+					update.currentModeId === "plan" && (this.currentMode === "bypass" || this.planFromBypass);
 				this.currentMode = update.currentModeId;
 				this.renderModes();
 				break;
@@ -1024,14 +1042,45 @@ export class ChatView {
 
 	// ------------------------------------------------------------ permission
 
+	/** Bypass mode, or plan mode the agent entered from it: the app answers
+	 * the CLI's remaining prompts itself. */
+	private get answersForUser(): boolean {
+		return this.currentMode === "bypass" || (this.currentMode === "plan" && this.planFromBypass);
+	}
+
 	private onPermission(request: PermissionRequest): Promise<PermissionOutcome> {
 		this.closeSegments();
 		this.markContent();
 		const known = this.tools.get(request.toolCall.toolCallId)?.data;
 		const tool: ToolCall = { ...known, ...request.toolCall, toolCallId: request.toolCall.toolCallId };
+		const question = isQuestion(request);
+		const risk = request._meta?.risk;
+		const labels = optionLabels(request, question);
+
+		// Bypass mode: the CLI still asks for risky calls, for a few tools of its
+		// own (enter_plan_mode) and questions. Plain requests are allowed here at
+		// once; risky ones and questions (first answer, usually the recommended
+		// one) after a short countdown the user can stop.
+		const autoPick = !this.answersForUser
+			? undefined
+			: question
+				? request.options[0]
+				: (request.options.find((o) => o.kind === "allow_once") ??
+					request.options.find((o) => o.kind.startsWith("allow")));
+		if (autoPick && !question && !risk) {
+			this.appendNote(`권한 무시 모드 · 자동 허용: ${displayTitle(tool, this.cwd)}`);
+			return Promise.resolve({ outcome: "selected", optionId: autoPick.optionId });
+		}
 
 		return new Promise<PermissionOutcome>((resolve) => {
+			let countdown: number | null = null;
+			const stopCountdown = () => {
+				if (countdown !== null) clearInterval(countdown);
+				countdown = null;
+				card.querySelector(".perm-auto")?.remove();
+			};
 			const done = (outcome: PermissionOutcome, label: string) => {
+				stopCountdown();
 				const index = this.permissions.findIndex((p) => p.card === card);
 				if (index >= 0) this.permissions.splice(index, 1);
 				card.classList.add("answered");
@@ -1047,18 +1096,41 @@ export class ChatView {
 					h(
 						"button",
 						{
-							class: `btn perm-${option.kind.startsWith("allow") ? "allow" : "reject"}`,
+							class: question
+								? "btn perm-option"
+								: `btn perm-${option.kind.startsWith("allow") ? "allow" : "reject"}`,
 							onclick: () =>
 								done(
 									{ outcome: "selected", optionId: option.optionId },
-									`${PERMISSION_LABEL[option.kind] ?? option.name} 선택함`,
+									question ? `답: ${labels[index].label}` : `${labels[index].label} 선택함`,
 								),
 						},
 						h("kbd", null, String(index + 1)),
-						PERMISSION_LABEL[option.kind] ?? option.name,
+						h("span", { class: "perm-option-label" }, labels[index].label),
+						labels[index].description
+							? h("span", { class: "perm-option-desc" }, labels[index].description)
+							: null,
 					),
 				),
 			);
+
+			const riskLine = risk
+				? h(
+						"div",
+						{ class: "perm-risk" },
+						svg(icons.alert),
+						h(
+							"div",
+							null,
+							h("div", null, `${RISK_LABEL[risk.kind] ?? risk.kind}${risk.detail ? ` · ${risk.detail}` : ""}`),
+							h(
+								"div",
+								{ class: "perm-risk-note" },
+								"위험 표시가 붙은 요청은 CLI가 '항상 허용'을 주지 않고 권한 무시 모드에서도 묻습니다.",
+							),
+						),
+					)
+				: null;
 
 			const preview = h("div", { class: "perm-preview" });
 			const command = commandOf(tool);
@@ -1076,22 +1148,55 @@ export class ChatView {
 				}
 			}
 
+			const auto = autoPick ? h("div", { class: "perm-auto" }) : null;
+
 			const card = h(
 				"div",
-				{ class: "perm" },
+				{ class: `perm${question ? " perm-question" : ""}` },
 				h(
 					"div",
 					{ class: "perm-head" },
-					svg(icons.shield),
-					h("span", null, "권한 요청"),
-					h("span", { class: "perm-title", title: tool.title ?? "" }, displayTitle(tool, this.cwd)),
+					svg(question ? icons.chat : icons.shield),
+					h("span", null, question ? "질문" : "권한 요청"),
+					h(
+						"span",
+						{ class: "perm-title", title: tool.title ?? "" },
+						question ? (tool.title ?? "") : displayTitle(tool, this.cwd),
+					),
 				),
+				riskLine,
 				preview.childNodes.length ? preview : null,
+				auto,
 				actions,
 			);
 			this.log.appendChild(card);
 			this.permissions.push({ card, resolve: (outcome) => done(outcome, "취소됨") });
 			this.scrollToBottom(true);
+
+			if (autoPick && auto) {
+				const label = labels[request.options.indexOf(autoPick)].label;
+				const text = h("span", null);
+				auto.append(
+					text,
+					h("button", { class: "btn", type: "button", onclick: stopCountdown }, "자동 선택 멈추기"),
+				);
+				let left = BYPASS_COUNTDOWN_SECONDS;
+				const tick = () => {
+					// Leaving bypass mode while it counts down hands the choice back.
+					if (!this.answersForUser) return stopCountdown();
+					if (left <= 0) {
+						return done(
+							{ outcome: "selected", optionId: autoPick.optionId },
+							question ? `권한 무시 모드 · 답: ${label} (자동)` : `권한 무시 모드 · ${label} 자동 선택함`,
+						);
+					}
+					text.textContent = `권한 무시 모드 · ${left}초 뒤 '${label}' 자동 선택`;
+					left--;
+				};
+				tick();
+				countdown = window.setInterval(tick, 1000);
+				return;
+			}
 			this.host.attention("permission", tool.title ?? "권한이 필요합니다");
 		});
 	}
@@ -1643,6 +1748,34 @@ export class ChatView {
 
 // ------------------------------------------------------------------ helpers
 
+/** `cmd acp` sends ask_user_question (and enter_plan_mode's "enter plan
+ * mode?") as a permission request whose options are the answers, ids
+ * `option_N`, every one of kind `allow_once`. */
+function isQuestion(request: PermissionRequest): boolean {
+	return request.options.length > 0 && request.options.every((o) => /^option_\d+$/.test(o.optionId));
+}
+
+/** Button text per option. Answers keep their own wording ("label:
+ * description" split back apart); permission options use the Korean label for
+ * their kind unless two options share a kind, which would read the same. */
+function optionLabels(request: PermissionRequest, question: boolean): { label: string; description: string }[] {
+	if (question) {
+		const raw = (request.toolCall.rawInput as { options?: unknown } | undefined)?.options;
+		return request.options.map((option, index) => {
+			const label = Array.isArray(raw) ? raw[index] : undefined;
+			if (typeof label === "string" && label && option.name.startsWith(label)) {
+				return { label, description: option.name.slice(label.length).replace(/^:\s*/, "") };
+			}
+			return { label: option.name, description: "" };
+		});
+	}
+	const unique = new Set(request.options.map((o) => o.kind)).size === request.options.length;
+	return request.options.map((option) => ({
+		label: (unique && PERMISSION_LABEL[option.kind]) || option.name,
+		description: "",
+	}));
+}
+
 function commandOf(tool: ToolCall): string | null {
 	if (tool.kind !== "execute") return null;
 	const input = tool.rawInput as { command?: unknown } | undefined;
@@ -1725,13 +1858,27 @@ function explainError(error: unknown): {
 		return { text: "이 계정의 로그인 정보가 더 이상 유효하지 않습니다. 다시 로그인해 주세요.", login: true };
 	}
 	const reset = message.match(/resets at (\d{4}-\d{2}-\d{2}T[\d:.]+Z)/);
-	if ((error instanceof AcpError && error.status === 429) || /usage limit|429/.test(message)) {
+	if ((error instanceof AcpError && error.status === 429) || /usage limit|today's limit|429/i.test(message)) {
 		const when = reset
 			? new Date(reset[1]).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })
 			: null;
-		const window = /weekly/i.test(message) ? "주간" : /daily/i.test(message) ? "일간" : "5시간";
+		// The CLI's wording: "your 5-hour|weekly|daily usage limit", or "today's
+		// limit on <model>". Anything else names no window; the gauge then tells
+		// which one ran out from the account's numbers instead of guessing here.
+		const model = message.match(/today's limit on (.+?)\.(?:\s|$)/i)?.[1];
+		const window = /weekly/i.test(message)
+			? "주간"
+			: model
+				? `${model} 일간`
+				: /daily/i.test(message)
+					? "일간"
+					: /5-hour|five.?hour/i.test(message)
+						? "5시간"
+						: /monthly/i.test(message)
+							? "월간"
+							: "";
 		return {
-			text: `${window} 사용 한도에 도달했습니다.${when ? ` ${when}에 초기화됩니다.` : ""} 다른 계정이나 모델로 바꾸거나 잠시 후 다시 시도하세요.`,
+			text: `${window ? `${window} ` : ""}사용 한도에 도달했습니다.${when ? ` ${when}에 초기화됩니다.` : ""}${window ? "" : " 어느 한도인지는 오른쪽 위 사용량에서 확인하세요."} 다른 계정이나 모델로 바꾸거나 잠시 후 다시 시도하세요.`,
 			login: false,
 			limit: { window, resetAt: reset ? Date.parse(reset[1]) : null },
 		};

@@ -26,11 +26,17 @@ export interface Billing {
 interface WindowLimit {
 	used?: number;
 	cap?: number;
+	/** Epoch ms; 0 while the window has not started. */
 	resetAt?: number | string;
+	exceeded?: boolean;
 }
 
+/** As the credits API sends them (seen 2026-10-27 on a Go plan):
+ * `{limited: true, exceeded: "weekly", fiveHour: {used, cap, resetAt, exceeded}, weekly: {…}}`. */
 export interface WindowLimits {
 	limited?: boolean;
+	/** Which window is over its cap right now, if any. */
+	exceeded?: string | null;
 	fiveHour?: WindowLimit | null;
 	weekly?: WindowLimit | null;
 	daily?: WindowLimit | null;
@@ -177,6 +183,8 @@ export interface UsageWindow {
 	percent: number;
 	/** Epoch ms, when known. */
 	resetAt: number | null;
+	/** Over its cap: requests stop until `resetAt`. */
+	exceeded: boolean;
 }
 
 export interface Usage {
@@ -187,17 +195,19 @@ export interface Usage {
 	percent: number | null;
 	daysLeft: number | null;
 	windows: UsageWindow[];
+	/** The window that is over its cap right now, if any. */
+	exceeded: UsageWindow | null;
 }
 
 function epochMs(value: number | string | undefined): number | null {
 	if (value === undefined || value === null) return null;
-	if (typeof value === "number") return value > 1e12 ? value : value * 1000;
+	if (typeof value === "number") return value <= 0 ? null : value > 1e12 ? value : value * 1000;
 	const parsed = Date.parse(value);
 	return Number.isNaN(parsed) ? null : parsed;
 }
 
 /** The CLI's /usage numbers: spent share of the month's pool, days left, and
- * any 5-hour / weekly windows. */
+ * any 5-hour / daily / weekly windows, shortest first. */
 export function usageOf(billing: Billing, now = Date.now()): Usage {
 	const remaining = balance(billing);
 	const allowance = billing.planId ? PLAN_ALLOWANCE[billing.planId] : undefined;
@@ -208,14 +218,26 @@ export function usageOf(billing: Billing, now = Date.now()): Usage {
 	const percent = pool && pool > 0 ? Math.min(100, Math.max(0, ((pool - remaining) / pool) * 100)) : null;
 	const end = billing.periodEnd ? Date.parse(billing.periodEnd) : Number.NaN;
 	const daysLeft = Number.isNaN(end) ? null : Math.max(0, Math.ceil((end - now) / 86_400_000));
+	const limits = billing.windowLimits;
 	const windows: UsageWindow[] = [];
-	const add = (label: string, window: WindowLimit | null | undefined) => {
+	let exceeded: UsageWindow | null = null;
+	const add = (key: "fiveHour" | "daily" | "weekly", label: string) => {
+		const window = limits?.[key];
 		if (!window || !window.cap) return;
 		const used = window.used ?? 0;
-		windows.push({ label, used, cap: window.cap, percent: Math.min(100, (used / window.cap) * 100), resetAt: epochMs(window.resetAt) });
+		const entry: UsageWindow = {
+			label,
+			used,
+			cap: window.cap,
+			percent: Math.min(100, (used / window.cap) * 100),
+			resetAt: epochMs(window.resetAt),
+			exceeded: window.exceeded === true || limits?.exceeded === key || used >= window.cap,
+		};
+		windows.push(entry);
+		if (entry.exceeded && (!exceeded || limits?.exceeded === key)) exceeded = entry;
 	};
-	add("5시간", billing.windowLimits?.fiveHour);
-	add("주간", billing.windowLimits?.weekly);
-	add("일간", billing.windowLimits?.daily);
-	return { remaining, pool, percent, daysLeft, windows };
+	add("fiveHour", "5시간");
+	add("daily", "일간");
+	add("weekly", "주간");
+	return { remaining, pool, percent, daysLeft, windows, exceeded };
 }

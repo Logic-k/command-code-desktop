@@ -22,6 +22,7 @@ import {
 	planName,
 	money,
 	balance,
+	type Usage,
 	usageOf,
 } from "./billing";
 import type { Launch, SessionInfo } from "./acp/types";
@@ -1091,6 +1092,31 @@ function bar(percent: number, tone: string): HTMLElement {
 	return h("span", { class: `gauge-bar ${tone}` }, h("span", { style: `width:${Math.max(2, percent).toFixed(1)}%` }));
 }
 
+/** Every limit the account has, shortest window first, the month's credits last. */
+function limitsOf(usage: Usage): { label: string; percent: number; resetAt: number | null; exceeded: boolean }[] {
+	const limits = usage.windows.map((w) => ({ label: w.label, percent: w.percent, resetAt: w.resetAt, exceeded: w.exceeded }));
+	if (usage.percent !== null) {
+		limits.push({ label: "월간", percent: usage.percent, resetAt: null, exceeded: usage.remaining <= 0 });
+	}
+	return limits;
+}
+
+/** The limit that stops requests now: one a turn ran into (the error names it
+ * most of the time; otherwise the window that is over, then the month's
+ * credits; label null when nothing says), or a window the server reports over
+ * its cap before any turn tried. */
+function reachedLimit(
+	hit: { window: string; resetAt: number | null } | null,
+	usage: Usage,
+): { label: string | null; resetAt: number | null } | null {
+	if (!hit) return usage.exceeded ? { label: usage.exceeded.label, resetAt: usage.exceeded.resetAt } : null;
+	const named = hit.window ? usage.windows.find((w) => w.label === hit.window) : undefined;
+	if (hit.window) return { label: hit.window, resetAt: hit.resetAt ?? named?.resetAt ?? null };
+	if (usage.exceeded) return { label: usage.exceeded.label, resetAt: hit.resetAt ?? usage.exceeded.resetAt };
+	if (usage.remaining <= 0) return { label: "월간", resetAt: hit.resetAt };
+	return { label: null, resetAt: hit.resetAt };
+}
+
 function renderGauge(): void {
 	const id = activeAccountId();
 	const entry = billingCache.get(id ?? "");
@@ -1109,26 +1135,48 @@ function renderGauge(): void {
 		return;
 	}
 	const usage = usageOf(billing);
-	const worstWindow = usage.windows.reduce<number | null>((max, w) => (max === null || w.percent > max ? w.percent : max), null);
-	const blocked = Boolean(hit) || usage.remaining <= 0;
-	const shown = Math.max(usage.percent ?? 0, worstWindow ?? 0);
-	const tone = level(usage.percent === null && worstWindow === null ? null : shown, blocked);
+	// Each limit by name ("5시간 12% · 주간 40% · 월간 63%"): one bare
+	// percentage could not say which window it was, and they reset at
+	// different times. The bar follows the fullest one.
+	const limits = limitsOf(usage);
+	const worst = limits.reduce<number | null>((max, l) => (max === null || l.percent > max ? l.percent : max), null);
+	const reached = reachedLimit(hit, usage);
+	const blocked = Boolean(reached) || usage.remaining <= 0;
+	const tone = level(worst, blocked);
 	gaugeEl.className = `usage-gauge ${tone}`;
 	const parts: (HTMLElement | string)[] = [];
-	if (usage.percent !== null || worstWindow !== null) parts.push(bar(blocked ? 100 : shown, tone));
-	parts.push(
-		h(
-			"span",
-			{ class: "gauge-text" },
-			hit
-				? `${hit.window} 한도${hit.resetAt ? ` · ${clock(hit.resetAt)} 초기화` : ""}`
-				: usage.percent !== null
-					? `${Math.round(shown)}% · ${money(usage.remaining)}`
-					: `잔액 ${money(usage.remaining)}`,
-		),
-	);
+	if (worst !== null) parts.push(bar(blocked ? 100 : worst, tone));
+	if (reached) {
+		parts.push(
+			h(
+				"span",
+				{ class: "gauge-text" },
+				`${reached.label ?? "사용"} 한도 도달${reached.resetAt ? ` · ${clock(reached.resetAt)} 초기화` : ""}`,
+			),
+		);
+	} else if (limits.length) {
+		parts.push(
+			h(
+				"span",
+				{ class: "gauge-text" },
+				limits.flatMap((l, i) => [
+					i ? " · " : "",
+					h("span", { class: `gauge-seg ${level(l.percent, false)}` }, h("span", { class: "gauge-seg-label" }, l.label), ` ${Math.round(l.percent)}%`),
+				]),
+				` · ${money(usage.remaining)}`,
+			),
+		);
+	} else {
+		parts.push(h("span", { class: "gauge-text" }, `잔액 ${money(usage.remaining)}`));
+	}
 	gaugeEl.replaceChildren(...parts);
-	gaugeEl.title = `${accountName(id)} · ${billingSummary(billing)} · 눌러서 자세히`;
+	gaugeEl.title = [
+		`${accountName(id)} · ${billingSummary(billing)}`,
+		...limits.map(
+			(l) => `${l.label} 한도 ${l.exceeded ? "도달" : `${Math.round(l.percent)}% 사용`}${l.resetAt ? ` · ${clock(l.resetAt)} 초기화` : l.label === "월간" && usage.daysLeft !== null ? ` · ${usage.daysLeft}일 뒤 갱신` : ""}`,
+		),
+		"눌러서 자세히",
+	].join("\n");
 	if (!gaugePanel.classList.contains("hidden")) renderGaugePanel();
 }
 
@@ -1142,13 +1190,29 @@ function renderGaugePanel(): void {
 		rows.push(h("div", { class: "muted small" }, entry?.error ?? "사용량을 불러오는 중입니다."));
 	} else {
 		const usage = usageOf(billing);
+		for (const w of usage.windows) {
+			rows.push(
+				h(
+					"div",
+					{ class: "gauge-row" },
+					h(
+						"div",
+						{ class: "gauge-row-head" },
+						h("span", null, `${w.label} 한도`),
+						w.exceeded ? h("strong", { class: "gauge-reached" }, "한도 도달") : h("span", null, `${Math.round(w.percent)}% 사용`),
+					),
+					bar(w.percent, level(w.percent, w.exceeded)),
+					h("div", { class: "muted small" }, `${money(w.used)} / ${money(w.cap)}${w.resetAt ? ` · ${clock(w.resetAt)} 초기화` : ""}`),
+				),
+			);
+		}
 		if (usage.percent !== null && usage.pool !== null) {
 			const tone = level(usage.percent, usage.remaining <= 0);
 			rows.push(
 				h(
 					"div",
 					{ class: "gauge-row" },
-					h("div", { class: "gauge-row-head" }, h("span", null, "이번 달 크레딧"), h("span", null, `${Math.round(usage.percent)}% 사용`)),
+					h("div", { class: "gauge-row-head" }, h("span", null, "월간 한도 (이번 달 크레딧)"), h("span", null, `${Math.round(usage.percent)}% 사용`)),
 					bar(usage.percent, tone),
 					h(
 						"div",
@@ -1160,23 +1224,16 @@ function renderGaugePanel(): void {
 		} else {
 			rows.push(h("div", { class: "gauge-row" }, h("div", { class: "gauge-row-head" }, h("span", null, "잔액"), h("span", null, money(usage.remaining)))));
 		}
-		for (const w of usage.windows) {
-			rows.push(
-				h(
-					"div",
-					{ class: "gauge-row" },
-					h("div", { class: "gauge-row-head" }, h("span", null, `${w.label} 한도`), h("span", null, `${Math.round(w.percent)}%`)),
-					bar(w.percent, level(w.percent, false)),
-					h("div", { class: "muted small" }, `${money(w.used)} / ${money(w.cap)}${w.resetAt ? ` · ${clock(w.resetAt)} 초기화` : ""}`),
-				),
-			);
+		if (!usage.windows.length) {
+			rows.push(h("div", { class: "muted small" }, "이 계정은 지금 5시간·주간 한도 정보가 없습니다. 서버가 보내 줄 때만 표시됩니다."));
 		}
-		if (hit) {
+		const reached = reachedLimit(hit, usage);
+		if (reached) {
 			rows.push(
 				h(
 					"div",
 					{ class: "gauge-alert" },
-					`${hit.window} 사용 한도에 도달했습니다.${hit.resetAt ? ` ${clock(hit.resetAt)}에 초기화됩니다.` : ""} 다른 계정이나 모델로 바꾸면 계속할 수 있습니다.`,
+					`${reached.label ? `${reached.label} ` : ""}사용 한도에 도달했습니다.${reached.resetAt ? ` ${clock(reached.resetAt)}에 초기화됩니다.` : reached.label ? "" : " 서버가 어느 한도인지 알려 주지 않았습니다."} 다른 계정이나 모델로 바꾸면 계속할 수 있습니다.`,
 				),
 			);
 		}
@@ -1736,7 +1793,7 @@ void appWindow.onDragDropEvent(async (event) => {
 // Dev builds expose the shell for driving the UI over the WebView2 debug port.
 if (import.meta.env.DEV) {
 	Object.assign(window, {
-		__cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal, closeTab, refreshAccounts, switchAccount, addAccount, cliLogin, openModelsDialog, openUpdates, accessFor, loadBilling, reportLimit, runCompat, renderGauge },
+		__cmdc: { tabs: () => tabs, active: () => activeTab, openChat, openTerminal, closeTab, refreshAccounts, switchAccount, addAccount, cliLogin, openModelsDialog, openUpdates, accessFor, loadBilling, billingCache, reportLimit, runCompat, renderGauge },
 	});
 }
 
