@@ -1,0 +1,8 @@
+{
+  "sourceId": "S29",
+  "kind": "selected-fields-view",
+  "name": "command-code",
+  "version": "1.88.0",
+  "license": "UNLICENSED",
+  "notice": "Metadata only; the CLI binary is not redistributed. Original full snapshot hash is in source-index.json."
+}

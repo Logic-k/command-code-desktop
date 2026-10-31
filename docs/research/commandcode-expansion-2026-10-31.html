@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CommandCode 확장: 근거와 복구가 있는 연구 작업대</title>
+<style>
+:root{color-scheme:light dark;--ink:var(--foreground,CanvasText);--paper:var(--background,Canvas);--dim:var(--muted-foreground,GrayText);--line:var(--border,color-mix(in srgb,CanvasText 20%,Canvas));--panel:var(--card,color-mix(in srgb,CanvasText 4%,Canvas));--accent:var(--primary,LinkText);--on-accent:var(--primary-foreground,HighlightText)}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font-sans,system-ui,sans-serif);line-height:1.75;word-break:keep-all;overflow-wrap:anywhere}article{width:100%}header{border-bottom:1px solid var(--line);padding-bottom:1rem}h1{font-size:1.8rem;line-height:1.35;margin:.4rem 0 1rem;letter-spacing:-.03em}h2{font-size:1.25rem;line-height:1.4;margin:1.8rem 0 .8rem}h3{font-size:1.05rem;margin:.2rem 0 .5rem}p{margin:.65rem 0}.eyebrow,.muted,figcaption{color:var(--dim)}.eyebrow{font-size:.85rem}.lead{font-size:1.1rem}.note{border-left:3px solid var(--accent);padding:.6rem 1rem;background:var(--panel)}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}.cell{border-top:1px solid var(--line);padding-top:1rem;min-width:0}a{color:var(--accent);text-underline-offset:.2em}a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;text-align:left;font-size:.92rem}th,td{vertical-align:top;padding:.65rem;border-bottom:1px solid var(--line)}th{font-weight:650}code,pre{font-family:var(--font-mono,ui-monospace,monospace);font-size:.88em}pre{padding:1rem;background:var(--panel);white-space:pre-wrap;overflow-wrap:anywhere}figure{margin:1.2rem 0}svg{display:block;width:100%;height:auto}svg text{font-family:var(--font-sans,system-ui,sans-serif);fill:var(--ink)}svg .box{fill:var(--panel);stroke:var(--line);stroke-width:2}svg .arrow{stroke:var(--accent);stroke-width:3;fill:none}figcaption{font-size:.85rem;margin-top:.7rem}.mobile-flow{display:none}summary{cursor:pointer;font-weight:650;padding:.8rem 0}details{border-top:1px solid var(--line)}.sources{font-size:.85rem}.sources li{margin:.4rem 0}footer{border-top:1px solid var(--line);margin-top:1.5rem;padding-top:1rem;font-size:.85rem}
+@media(max-width:620px){.grid{grid-template-columns:1fr}h1{font-size:1.5rem}.desktop-flow{display:none}.mobile-flow{display:block}th,td{padding:.5rem}.table-wrap table{min-width:520px}}
+@media print{body{color:CanvasText;background:Canvas}details{break-inside:avoid}a{color:inherit}header{break-after:avoid}}
+</style>
+</head>
+<body><article>
+<header>
+<p class="eyebrow">COMMANDCODE DESKTOP · 확장 리서치</p>
+<h1>그래프보다 먼저, 근거와 복구</h1>
+<p class="lead" data-claim="C10">Tauri와 기존 실행기를 유지하고 <strong>조사에서 검토·제작까지 이어지는 작업대</strong>로 확장합니다. 권한과 종료, 실제 검사 증거를 먼저 고정합니다. <a href="#sources">[S1][S24][S25]</a></p>
+<p class="note">이번 산출물은 <strong>리서치와 AI 실행계획</strong>입니다. 제품 구현이나 출시 완료가 아닙니다. 모든 조사 모델은 ChatGPT 구독 경로로 고정했습니다.</p>
+</header>
+<section aria-labelledby="why">
+<h2 id="why">직접 확인한 출발점</h2>
+<div class="grid">
+<div class="cell" data-claim="C1"><h3>통과 문자열은 실행 증거가 아닙니다</h3><p>아무 도구도 실행하지 않은 합성 결과가 그럴듯한 verifier JSON을 반환하면 현재 실행기는 통과했습니다. 실제 host 검사 영수증과 모델 판정을 나눠야 합니다. <a href="#sources">[S1][S24]</a></p></div>
+<div class="cell" data-claim="C2"><h3>수정 전 교훈이 살아남습니다</h3><p>첫 회고 뒤 구현을 수정하고 재검증해도 최초 학습 후보가 노출됐습니다. 후보를 최종 attempt·산출물 revision에 묶어야 합니다. <a href="#sources">[S1][S24]</a></p></div>
+<div class="cell" data-claim="C3"><h3>정상인 기존 가드는 보존합니다</h3><p>잘못된 JSON과 빈 근거 차단, 통제된 로컬 형제 실패의 취소·정리는 확인했습니다. 실제 provider 취소나 프로세스 회수의 증거로 확대하지 않습니다. <a href="#sources">[S1][S25]</a></p></div>
+<div class="cell" data-claim="C4"><h3>정적 위험과 재현은 다릅니다</h3><p>부모 권한 처리기의 자식 재사용과 IPC 단절 정리 분기는 후속 검사의 표적입니다. 실제 쓰기 탈출이나 고아 프로세스를 재현했다고 주장하지 않습니다. <a href="#sources">[S25][S26]</a></p></div>
+</div>
+</section>
+<section aria-labelledby="order">
+<h2 id="order">권고하는 선후 관계</h2>
+<figure data-claim="C7">
+<svg class="desktop-flow" viewBox="0 0 1100 190" role="img" aria-labelledby="flow-title flow-desc">
+<title id="flow-title">권한에서 승인된 학습까지의 확장 순서</title><desc id="flow-desc">역할 권한과 종료, 저장과 수동 복구, 증거와 근거, 연구에서 제작, 승인된 재사용 순이다.</desc>
+<path class="arrow" d="M200 85H230M420 85H450M640 85H670M860 85H890"/>
+<g><rect class="box" x="2" y="25" width="198" height="120" rx="8"/><text x="100" y="72" text-anchor="middle" font-size="23">권한 · 종료</text><text x="100" y="108" text-anchor="middle" font-size="18">실패를 끝내는 계약</text></g>
+<g><rect class="box" x="230" y="25" width="190" height="120" rx="8"/><text x="325" y="72" text-anchor="middle" font-size="23">저장 · 복구</text><text x="325" y="108" text-anchor="middle" font-size="18">불명확한 효과 보존</text></g>
+<g><rect class="box" x="450" y="25" width="190" height="120" rx="8"/><text x="545" y="72" text-anchor="middle" font-size="23">증거 · 근거</text><text x="545" y="108" text-anchor="middle" font-size="18">원문과 실제 검사</text></g>
+<g><rect class="box" x="670" y="25" width="190" height="120" rx="8"/><text x="765" y="72" text-anchor="middle" font-size="23">연구 → 제작</text><text x="765" y="108" text-anchor="middle" font-size="18">근거 revision 승인</text></g>
+<g><rect class="box" x="890" y="25" width="208" height="120" rx="8"/><text x="994" y="72" text-anchor="middle" font-size="23">승인된 재사용</text><text x="994" y="108" text-anchor="middle" font-size="18">후보별 적용과 철회</text></g>
+</svg>
+<svg class="mobile-flow" viewBox="0 0 360 650" role="img" aria-labelledby="mobile-title mobile-desc">
+<title id="mobile-title">작은 화면의 확장 순서</title><desc id="mobile-desc">권한과 종료부터 저장, 증거, 제작, 승인된 재사용 순으로 진행한다.</desc>
+<path class="arrow" d="M180 104V136M180 232V264M180 360V392M180 488V520"/>
+<rect class="box" x="10" y="8" width="340" height="96" rx="8"/><text x="180" y="49" text-anchor="middle" font-size="22">권한 · 종료</text><text x="180" y="79" text-anchor="middle" font-size="17">실패를 끝내는 계약</text>
+<rect class="box" x="10" y="136" width="340" height="96" rx="8"/><text x="180" y="177" text-anchor="middle" font-size="22">저장 · 수동 복구</text><text x="180" y="207" text-anchor="middle" font-size="17">불명확한 효과를 자동 재실행하지 않음</text>
+<rect class="box" x="10" y="264" width="340" height="96" rx="8"/><text x="180" y="305" text-anchor="middle" font-size="22">증거 · 근거</text><text x="180" y="335" text-anchor="middle" font-size="17">원문과 실제 검사 영수증</text>
+<rect class="box" x="10" y="392" width="340" height="96" rx="8"/><text x="180" y="433" text-anchor="middle" font-size="22">연구 → 제작</text><text x="180" y="463" text-anchor="middle" font-size="17">검토한 근거 revision으로 시작</text>
+<rect class="box" x="10" y="520" width="340" height="96" rx="8"/><text x="180" y="561" text-anchor="middle" font-size="22">승인된 재사용</text><text x="180" y="591" text-anchor="middle" font-size="17">후보별 적용과 철회</text>
+</svg>
+<figcaption>설계상 선후 관계입니다. 시간·비용·개선율을 나타내는 차트가 아닙니다. 구독 adapter는 별도 지원·자격 게이트를 통과해야 합니다. <a href="#sources">[S1][S8][S15][S16]</a></figcaption>
+</figure>
+</section>
+<section data-claim="C5" aria-labelledby="subscription">
+<h2 id="subscription">구독 연동은 조건부입니다</h2>
+<p>공식 SIWC에는 로컬·오픈소스의 동의 기반 plan usage 경로가 있습니다. 신원 로그인과 추론 동의, 로컬과 hosted 제품, 안정 메서드와 app-server production 지원은 서로 다릅니다. <a href="#sources">[S2][S3][S4][S5]</a></p>
+<p><strong>제안:</strong> 실험 adapter를 별도로 만들고 인증·실효 모델·취소·갱신·비용 경로를 검증합니다. API-key fallback은 없으며, allowance-only를 보장할 수 없는 엄격 모드는 실행을 거부합니다. 보조 모델도 예외가 아닙니다. <a href="#sources">[S20][S21][S23]</a></p>
+</section>
+<section aria-labelledby="reuse" data-claim="C10">
+<h2 id="reuse">전체 런타임보다 필요한 부품</h2>
+<div class="table-wrap" tabindex="0" aria-label="재사용 선택 표">
+<table><thead><tr><th>대상</th><th>선택</th><th>이유</th></tr></thead><tbody>
+<tr><td>기존 Tauri · DOM/SVG · 실행기</td><td>유지</td><td>현재 경계를 검증하고 보강</td></tr>
+<tr><td>Rust SQLite</td><td>고정 후보</td><td>단일 writer와 transaction, 수동 복구부터</td></tr>
+<tr><td>Agent Skills · Hermes 패턴</td><td>선별 재사용</td><td>라이선스·승인·revision과 효과 검증은 별도</td></tr>
+<tr><td>LangGraph · Temporal 전체</td><td>보류</td><td>외부 효과·인증·로컬 배포 문제가 사라지지 않음</td></tr>
+<tr><td>새 그래프 엔진 · React 전환</td><td>보류</td><td>근거 표와 기존 SVG의 한계를 먼저 확인</td></tr>
+<tr><td>외부 CLI 번들</td><td>허가 전 제외</td><td>MIT shell이 CLI 라이선스를 대신하지 않음</td></tr>
+</tbody></table></div>
+<p class="muted">도구 성능 우열을 측정했다는 뜻이 아닙니다. <a href="#sources">[S9][S15][S16][S28][S29][S30][S32][S33]</a></p>
+</section>
+<section data-claim="C9" aria-labelledby="workspace">
+<h2 id="workspace">결과를 기본으로, 그래프는 관계 탐색으로</h2>
+<p><strong>결과 · 근거 · 활동 · 변경 · 관계</strong>를 나눕니다. 사용자는 출처와 반대 근거를 확인한 뒤 <strong>이 근거로 구현</strong>을 선택합니다. 그래프를 읽지 않아도 승인·검토·중지를 끝낼 수 있어야 합니다. <a href="#sources">[S24][S25][S28]</a></p>
+<p data-claim="C8">Taste는 최종 결과에 묶인 선호·절차·환경 사실의 재사용입니다. 후보별 근거, 승인, 철회가 필요하며 자동 RL이나 검증된 개선율로 부르지 않습니다. <a href="#sources">[S1][S9][S11][S12][S22]</a></p>
+</section>
+<section aria-labelledby="files" data-claim="C13">
+<h2 id="files">AI가 실행할 문서</h2>
+<p>보고서: <code>docs/research/commandcode-expansion-2026-10-31.md</code></p>
+<p>실행계획: <a href="../../.omo/plans/commandcode-research-platform.md"><code>.omo/plans/commandcode-research-platform.md</code></a></p>
+<p>계획에는 파일 경계, 데이터 계약, 패키지 DAG, 실패·복구, acceptance, 실제 검증 명령과 종료 수준이 들어 있습니다. 구현은 새 사용자 지시 뒤에 시작합니다.</p>
+<details><summary>후속 에이전트에게 전달할 지시</summary><pre>이 저장소의 .omo/plans/commandcode-research-platform.md를 읽고 실행하라.
+기존 미커밋 변경을 보존하고 WP-00부터 선행 게이트 순서대로 진행한다.
+모델 호출은 확인된 ChatGPT 구독 경로만 사용한다. API-key/provider fallback은 금지한다.
+오프라인 peer, 실제 Rust stdio, 라이브 모델, 대상 OS 증거를 서로 대체하지 않는다.
+불명확한 외부 효과는 자동 재실행하지 않고 자격 없는 출시 게이트는 blocked로 남긴다.</pre></details>
+</section>
+<footer>
+<h2>방법과 남은 확인</h2>
+<p>공개 공식 원문·고정 코드와 로컬 실행 반례를 종합했습니다. 사용자 브라우저는 권한이 승인되지 않아 자료를 읽지 못했습니다. 다른 모델·API-key 추론·로그인·제품 변경은 하지 않았습니다.</p>
+<p>정적 권한·프로세스 위험의 실제 효과, provider 동시성·취소, 계정 자격·credits, 라이브 품질·OS별 배포는 후속 게이트입니다. 출처·claim·시각·교정 결과와 정리 영수증은 조사 원장에 기록합니다.</p>
+<h2 id="sources">출처와 증거</h2>
+<ul class="sources">
+<li>[S1] 로컬 반례 stdout, [S24] workflow.ts, [S25] chat.ts, [S26] acp.rs, [S28] package.json: 조사 원장의 고정 스냅샷.</li>
+<li>[S2] <a href="https://learn.chatgpt.com/docs/app-server">Codex app-server</a> · [S3] <a href="https://developers.openai.com/siwc/token-sharing-open-source">SIWC</a> · [S4] <a href="https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations">제한</a> · [S5] <a href="https://developers.openai.com/codex/auth">인증</a>.</li>
+<li>[S8] <a href="https://sqlite.org/wal.html">SQLite WAL</a> · [S15] <a href="https://v2.tauri.app/plugin/sql/">Tauri SQL</a> · [S16] <a href="https://docs.langchain.com/oss/javascript/langgraph/fault-tolerance">LangGraph 복구</a>.</li>
+<li>[S9] <a href="https://agentskills.io/specification">Agent Skills</a> · [S11] <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Hermes skills</a> · [S12] <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory">memory</a>.</li>
+<li>[S20] Promptfoo API-key gating · [S21] smolagents visualizer · [S22] Hermes write approval · [S23] Codex auth protocol: 고정 커밋 원문과 URL은 Markdown 보고서에 수록.</li>
+<li>[S29] 설치 CLI manifest · [S30] rusqlite manifest · [S32] Agent Skills license 안내 · [S33] Hermes MIT license: 원문·해시는 조사 원장에 보존.</li>
+</ul>
+<p><code>.omo/ulw-research/20261031-commandcode-expansion/</code></p>
+</footer>
+</article></body></html>

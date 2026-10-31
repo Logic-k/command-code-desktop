@@ -1,0 +1,29 @@
+{
+  "boundary": "local executor only, no live LLM or Rust stdio",
+  "observations": [
+    {
+      "id": "V-PROOF",
+      "verdict": "confirmed-gap",
+      "observed": "The current runner accepts a forged textual verifier receipt and exposes an unsupported learning candidate.",
+      "implication": "Keep agent verdict separate from deterministic command/source/artifact checks and approved learning provenance."
+    },
+    {
+      "id": "V-STRUCTURE",
+      "verdict": "confirmed-existing-guard",
+      "observed": "Malformed JSON throws and an empty evidence array does not pass.",
+      "implication": "Retain these guards; a stronger evidence model extends rather than replaces them."
+    },
+    {
+      "id": "V-CANCEL",
+      "verdict": "confirmed-existing-guard",
+      "observed": "Controlled peer failure cancels sibling executors and no dependent critique starts.",
+      "implication": "Preserve settlement semantics while adding provider-level acknowledgement, deadlines and restart recovery."
+    },
+    {
+      "id": "V-STALE",
+      "verdict": "confirmed-gap",
+      "observed": "The original reflection remains eligible after a correction invalidates its technique and the second verifier passes.",
+      "implication": "Bind learning to the final artifact/attempt revision and invalidate or re-evaluate older candidates."
+    }
+  ]
+}

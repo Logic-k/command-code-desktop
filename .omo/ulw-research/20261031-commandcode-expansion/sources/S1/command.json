@@ -1,0 +1,10 @@
+{
+  "argv": [
+    "bun",
+    "E:/CommandCode_Desktop/.omo/ulw-research/20261031-commandcode-expansion/verify-claims.mjs"
+  ],
+  "cwd": "E:\\CommandCode_Desktop",
+  "exit_status": 0,
+  "stdout_sha256": "dc115f82365b8cf2f9b6b96cb61ceb70412cea535aae98adb2a49f9399bde67c",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

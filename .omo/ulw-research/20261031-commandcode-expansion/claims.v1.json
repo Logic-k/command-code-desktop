@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "graph": "E:\\CommandCode_Desktop\\.omo\\ulw-research\\20261031-commandcode-expansion\\claim-graph.md",
+  "graph_sha256": "4a630f817a58a9a681275df32987972ad3a5e9c08ec797b33aaec1be434ac6fd",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "statement": "Current agent verdict does not prove tool execution",
+      "risk": "high",
+      "status": "verified",
+      "in_verified": true
+    },
+    {
+      "claim_id": "C2",
+      "statement": "Current reflection can be stale after successful correction",
+      "risk": "high",
+      "status": "verified",
+      "in_verified": true
+    },
+    {
+      "claim_id": "C3",
+      "statement": "Local sibling settlement works but is not provider cancellation acknowledgement",
+      "risk": "high",
+      "status": "verified",
+      "in_verified": true
+    },
+    {
+      "claim_id": "C4",
+      "statement": "Child permission reuse is a static boundary risk, not a reproduced write escape",
+      "risk": "high",
+      "status": "verified",
+      "in_verified": true
+    },
+    {
+      "claim_id": "C5",
+      "statement": "Subscription integration is possible only under its documented scope and capability gates",
+      "risk": "high",
+      "status": "verified",
+      "in_verified": true
+    },
+    {
+      "claim_id": "C6",
+      "statement": "Top-level model choice alone cannot guarantee subscription-only auxiliary calls",
+      "risk": "high",
+      "status": "verified",
+      "in_verified": true
+    },
+    {
+      "claim_id": "C7",
+      "statement": "Local durable state and external side effects need different recovery decisions",
+      "risk": "high",
+      "status": "verified",
+      "in_verified": true
+    },
+    {
+      "claim_id": "C8",
+      "statement": "Portable skills are not approval, sandbox or quality guarantees",
+      "risk": "high",
+      "status": "verified",
+      "in_verified": true
+    },
+    {
+      "claim_id": "C9",
+      "statement": "Research result, execution log and relation graphs should be separate views",
+      "risk": "medium",
+      "status": "verified",
+      "in_verified": true
+    },
+    {
+      "claim_id": "C10",
+      "statement": "Existing runner/UI reuse is lower-scope than importing a second agent runtime",
+      "risk": "medium",
+      "status": "verified",
+      "in_verified": true
+    },
+    {
+      "claim_id": "C11",
+      "statement": "Native IPC cleanup has a conditional process ownership risk",
+      "risk": "high",
+      "status": "verified",
+      "in_verified": true
+    },
+    {
+      "claim_id": "C12",
+      "statement": "Framework or standard adoption must not be sold as verified research quality",
+      "risk": "high",
+      "status": "verified",
+      "in_verified": true
+    },
+    {
+      "claim_id": "C13",
+      "statement": "Delivered documents contain the stated plan contracts and do not authorize implementation",
+      "risk": "medium",
+      "status": "verified",
+      "in_verified": true
+    }
+  ],
+  "errors": []
+}
