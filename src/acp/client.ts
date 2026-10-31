@@ -15,6 +15,16 @@ import type {
 const PROTOCOL_VERSION = 1;
 const LOG_LINES = 400;
 
+/** How long a request may go unanswered before it fails. A prompt runs as long
+ * as the agent works (the user cancels it); a cold `initialize` can take 10-20 s
+ * on a slow disk; everything else answers at once from a live agent. */
+function timeoutFor(method: string): number | null {
+	if (method === "session/prompt") return null;
+	if (method === "initialize") return 120_000;
+	if (method === "session/new" || method === "session/load" || method === "session/resume") return 90_000;
+	return 30_000;
+}
+
 /** A JSON-RPC error from the agent, kept structured so the UI can explain it. */
 export class AcpError extends Error {
 	constructor(
@@ -98,6 +108,13 @@ export class AcpConnection {
 			onMessage,
 			onLog,
 		});
+		// stop() during the spawn found nothing to kill; the process exists now.
+		if (this.dead) {
+			this.unlistenExit?.();
+			this.unlistenExit = null;
+			await invoke("acp_kill", { id: this.id }).catch(() => undefined);
+			throw new AcpError(-32000, "연결이 닫혔습니다.");
+		}
 		this.alive = true;
 
 		this.info = await this.request<InitializeResult>("initialize", {
@@ -110,10 +127,22 @@ export class AcpConnection {
 	request<T>(method: string, params: unknown): Promise<T> {
 		if (!this.alive) return Promise.reject(new AcpError(-32000, "에이전트 프로세스가 실행 중이 아닙니다."));
 		const id = this.nextId++;
+		const limit = timeoutFor(method);
 		return new Promise<T>((resolve, reject) => {
-			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
+			const timer = limit === null ? null : window.setTimeout(() => {
+				if (!this.pending.delete(id)) return;
+				reject(new AcpError(-32001, `에이전트가 ${Math.round(limit / 1000)}초 동안 응답하지 않았습니다 (${method}).`));
+			}, limit);
+			const settle = () => {
+				if (timer !== null) clearTimeout(timer);
+			};
+			this.pending.set(id, {
+				resolve: (value) => { settle(); resolve(value as T); },
+				reject: (error) => { settle(); reject(error); },
+			});
 			this.send({ jsonrpc: "2.0", id, method, params }).catch((error) => {
 				this.pending.delete(id);
+				settle();
 				reject(error);
 			});
 		});

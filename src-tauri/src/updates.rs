@@ -160,7 +160,13 @@ impl UpdateBuild {
     }
 }
 
-use crate::procs::{alive, kill_tree};
+use crate::procs::{alive, image_name, kill_tree};
+
+/// Whether a process name is the shell `shell()` starts a build with.
+fn is_build_shell(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if cfg!(windows) { name == "cmd.exe" } else { name == "sh" }
+}
 
 /// Build the latest source into the app data dir, streaming the build log.
 /// Returns the new executable's path.
@@ -190,7 +196,9 @@ pub async fn app_update_build(app: AppHandle, on_log: Channel<String>) -> Result
     // A build left by an earlier run of the app (closed mid-build) still holds
     // cargo's lock on this directory; end it instead of queueing behind it.
     if let Some(pid) = std::fs::read_to_string(&pid_file).ok().and_then(|t| t.trim().parse::<u32>().ok()) {
-        if alive(pid) {
+        // The id may since belong to an unrelated process; the build's root is
+        // always the shell from `shell()`.
+        if image_name(pid).is_some_and(|name| is_build_shell(&name)) {
             let _ = on_log.send(format!("이전 실행에서 남은 빌드(pid {pid})를 정리합니다."));
             kill_tree(pid);
         }
@@ -264,6 +272,10 @@ pub async fn app_update_build(app: AppHandle, on_log: Channel<String>) -> Result
     result
 }
 
+/// Shown by the swap helper when the copy keeps failing (the exe stayed locked):
+/// the previous version starts again, and the user should know it did.
+const SWAP_FAILED: &str = "새 버전으로 교체하지 못해 이전 버전을 다시 시작합니다. 앱을 닫은 뒤 업데이트를 다시 시도하세요.";
+
 /// Replace the running exe with `new_exe` and restart: a hidden helper
 /// (PowerShell on Windows, sh elsewhere) waits for this process to exit,
 /// copies the file, and relaunches it.
@@ -280,7 +292,9 @@ pub fn app_update_apply(app: AppHandle, new_exe: String) -> Result<(), String> {
         let script = format!(
             "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
              $ok = $false; foreach ($i in 1..20) {{ try {{ Copy-Item -LiteralPath {src} -Destination {dst} -Force -ErrorAction Stop; $ok = $true; break }} catch {{ Start-Sleep -Milliseconds 500 }} }}; \
+             if (-not $ok) {{ Add-Type -AssemblyName PresentationFramework; [void][System.Windows.MessageBox]::Show('{failed}', 'Command Code Desktop') }}; \
              Start-Process -FilePath {dst}",
+            failed = SWAP_FAILED,
             src = quote(&new_exe),
             dst = quote(&current),
         );
@@ -291,8 +305,10 @@ pub fn app_update_apply(app: AppHandle, new_exe: String) -> Result<(), String> {
         let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"));
         let script = format!(
             "while kill -0 {pid} 2>/dev/null; do sleep 0.5; done; \
-             for i in $(seq 1 20); do cp -f {src} {dst} && break; sleep 0.5; done; \
+             ok=0; for i in $(seq 1 20); do cp -f {src} {dst} && ok=1 && break; sleep 0.5; done; \
+             [ $ok = 1 ] || osascript -e 'display alert \"Command Code Desktop\" message \"{failed}\"' >/dev/null 2>&1; \
              {dst} >/dev/null 2>&1 &",
+            failed = SWAP_FAILED,
             src = quote(&new_exe),
             dst = quote(&current),
         );
@@ -430,6 +446,11 @@ pub async fn cli_update(check_only: bool) -> Result<CliUpdate, String> {
             .map(str::trim)
             .filter(|l| !l.is_empty() && !l.starts_with("- "))
             .collect();
+        // A failed update (network, npm permissions) must not read as "up to date".
+        if !output.status.success() {
+            let detail = if lines.is_empty() { "출력 없음".to_string() } else { lines.join("\n") };
+            return Err(format!("cmd update 실패 (종료 코드 {:?}):\n{detail}", output.status.code()));
+        }
         Ok(CliUpdate {
             output: lines.join("\n"),
             version: resolve_launch().version,

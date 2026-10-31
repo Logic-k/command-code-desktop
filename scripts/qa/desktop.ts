@@ -14,12 +14,25 @@ let channel: { onmessage(line: string): void };
 let verifyCount = 0;
 let peerMode = "retry";
 let pending: { id: number; sessionId: string }[] = [];
+/** Permission requests the peer sent, by JSON-RPC id, until the client answers. */
+const asked = new Map<string, (outcome: unknown) => void>();
+let askSeq = 0;
 const state = () => ({
-	modes: { currentModeId: "default", availableModes: [{ id: "default", name: "표준" }, { id: "plan", name: "계획" }] },
+	modes: { currentModeId: "default", availableModes: [{ id: "default", name: "표준" }, { id: "plan", name: "계획" }, { id: "bypass", name: "권한 무시" }] },
 	configOptions: [
 		{ id: "model", category: "model", name: "모델", type: "select", currentValue: "offline-peer", options: [{ value: "offline-peer", name: "OFFLINE QA · 추론 없음" }] },
 		{ id: "effort", name: "추론 강도", type: "select", currentValue: "high", options: [{ value: "high", name: "high" }] },
 	],
+});
+const outcomes: unknown[] = [];
+/** The agent asks the client for permission; resolves with the client's outcome. */
+const ask = (sessionId: string, toolCall: object, meta?: object) => new Promise<unknown>((resolve) => {
+	const id = `perm-${++askSeq}`;
+	asked.set(id, resolve);
+	channel.onmessage(JSON.stringify({ jsonrpc: "2.0", id, method: "session/request_permission", params: {
+		sessionId, toolCall, _meta: meta,
+		options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }],
+	} }));
 });
 const reply = (id: number, result: unknown) => channel.onmessage(JSON.stringify({ jsonrpc: "2.0", id, result }));
 const update = (sessionId: string, value: object) => channel.onmessage(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: value } }));
@@ -27,6 +40,11 @@ const peer = async (method: string, args: Record<string, unknown>) => {
 	if (method === "acp_kill") return;
 	if (method !== "acp_send") throw new Error(`Unexpected IPC: ${method}`);
 	const message = JSON.parse(String(args.line));
+	if (!message.method && typeof message.id === "string") {
+		asked.get(message.id)?.(message.result?.outcome);
+		asked.delete(message.id);
+		return;
+	}
 	const params = message.params ?? {};
 	records.push({ method: message.method, params });
 	switch (message.method) {
@@ -61,8 +79,15 @@ const peer = async (method: string, args: Record<string, unknown>) => {
 			const verifier = nodeId.startsWith("verify-");
 			let output = "OFFLINE QA result: local transport exercised. This is not live research evidence.";
 			if (nodeId === "reflect") output = JSON.stringify({ lessons: ["QA-only lesson: measure before changing; invocation: local ACP peer"] });
+			if (peerMode === "edit-request" && !verifier && nodeId !== "implement") {
+				// A read-only role asking to write: the app must refuse it unseen.
+				outcomes.push(await ask(params.sessionId, { toolCallId: `edit-${nodeId}`, title: "Edit: src/main.ts", kind: "edit" }));
+			}
 			if (verifier) {
 				verifyCount += 1;
+				// The command the verifier ran, as the app sees it in the session.
+				update(params.sessionId, { sessionUpdate: "tool_call", toolCallId: `test-${verifyCount}`, title: "Shell: pnpm test", kind: "execute", status: "in_progress" });
+				update(params.sessionId, { sessionUpdate: "tool_call_update", toolCallId: `test-${verifyCount}`, status: "completed" });
 				output = peerMode === "malformed" ? "not-json" : JSON.stringify({
 					passed: peerMode !== "retry" || verifyCount > 1,
 					evidence: ["Offline peer transport receipt"],
@@ -88,6 +113,25 @@ Object.defineProperty(AcpConnection.prototype, "send", { value: function(message
 	return peer("acp_send", { line: JSON.stringify(message) });
 } });
 
+// A plain browser has no Tauri bridge; answer the two commands the composer
+// and export use with fixtures. A native WebView keeps its real bridge.
+const fixture = [
+	{ type: "message", message: { role: "user", content: "README 요약해 줘" } },
+	{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "요약입니다." }] } },
+].map((entry) => JSON.stringify(entry)).join("\n");
+const saved: { name?: string; content?: string }[] = [];
+if (!("__TAURI_INTERNALS__" in window)) {
+	Object.assign(window, { __TAURI_INTERNALS__: { invoke: async (cmd: string, args: { name?: string; content?: string }) => {
+		if (cmd === "list_files") return ["README.md", "src/main.ts", "src/views/chat.ts", "src-tauri/src/files.rs"];
+		if (cmd === "read_transcript") return fixture;
+		if (cmd === "save_text_file") {
+			saved.push({ name: args.name, content: args.content });
+			return `/offline-qa/${args.name}`;
+		}
+		throw new Error(`no Tauri bridge: ${cmd}`);
+	} } });
+}
+
 // The offline peer never touches this directory. Keep the default independent
 // of the original workstation; a caller can supply ?cwd=... for a named fixture.
 const qaCwd = new URL(window.location.href).searchParams.get("cwd") || "/offline-qa/project";
@@ -109,7 +153,20 @@ Object.assign(window, {
 	qa: {
 		records,
 		sessions,
+		outcomes,
+		saved,
 		setMode(mode: string) { peerMode = mode; verifyCount = 0; },
+		/** Put the chat in a mode as the agent would report it (no confirm dialog). */
+		agentMode(modeId: string) {
+			if (!view.sessionId) throw new Error("Not ready");
+			update(view.sessionId, { sessionUpdate: "current_mode_update", currentModeId: modeId });
+		},
+		/** The chat's agent asks for permission; `risk` adds the CLI's `_meta.risk`. */
+		ask(risk?: string) {
+			if (!view.sessionId) throw new Error("Not ready");
+			return ask(view.sessionId, { toolCallId: `ask-${askSeq + 1}`, title: "Shell: rm -rf ../shared", kind: "execute" },
+				risk ? { risk: { kind: risk, detail: "../shared" } } : undefined);
+		},
 		observe() {
 			const sessionId = view.sessionId;
 			if (!sessionId) throw new Error("Not ready");

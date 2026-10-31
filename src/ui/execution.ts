@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { createWorkflow, learningCandidates, WORKFLOWS, workflowKind, type WorkflowKind, type WorkflowRun } from "../workflow";
 import { renderUlwCanvas, type UlwRun } from "./dag";
 import { h } from "./dom";
@@ -60,7 +61,7 @@ export class ExecutionPanel {
 			h("details", null, h("summary", null, "프로젝트 Taste"),
 				h("p", null, "저장한 취향을 각 역할에 전달합니다. 모델 학습이 아닙니다. 기존 taste 파일은 변경하지 않습니다."),
 				this.taste, save),
-			h("p", { class: "execution-description" }, "현재 Command Code 계정·선택 모델을 사용합니다(ChatGPT 구독 연결 아님). 역할마다 추론이 발생합니다. 조사 세션은 계획 모드, 구현은 현재 권한 모드입니다. 앱 종료 후 자동 재개되지 않습니다."),
+			h("p", { class: "execution-description" }, "현재 Command Code 계정·선택 모델을 사용합니다. 역할마다 추론이 발생합니다. 조사 역할은 계획 모드, 구현은 시작할 때의 권한 모드, 코딩 검증은 표준 모드(권한 무시 중이면 그대로)로 실행하며 읽기 전용 역할의 변경 요청은 거부합니다. 검증은 그 세션에서 실제로 완료된 도구 호출 기록이 있어야 통과합니다. 앱 종료 후 자동 재개되지 않습니다."),
 			h("div", { class: "execution-controls" }, this.start, this.stop, this.exportButton),
 			this.status, this.graphLabel, this.graph, this.results, this.learning, this.observed,
 		);
@@ -118,11 +119,20 @@ export class ExecutionPanel {
 		this.graph.scrollLeft = left;
 		this.renderResult();
 		const candidates = learningCandidates(run);
+		// Unchecked by default: a lesson becomes part of every later prompt only
+		// when the user picks it.
+		const boxes = candidates.map(() => h("input", { type: "checkbox" }));
 		this.learning.replaceChildren(h("div", null,
 			candidates.length ? h("h3", null, "검증된 실행의 학습 후보") : null,
-			candidates.length ? h("ul", null, candidates.map((item) => h("li", null, item))) : null,
+			candidates.length ? h("ul", { class: "execution-candidates" }, candidates.map((item, index) =>
+				h("li", null, h("label", null, boxes[index], ` ${item}`)))) : null,
 			candidates.length ? h("button", { class: "btn", type: "button", onclick: () => {
-				const next = [this.taste.value, ...candidates].filter(Boolean).join("\n");
+				const picked = candidates.filter((_, index) => (boxes[index] as HTMLInputElement).checked);
+				if (!picked.length) {
+					this.status.textContent = "반영할 학습 후보를 선택하세요.";
+					return;
+				}
+				const next = [this.taste.value, ...picked].filter(Boolean).join("\n");
 				try {
 					localStorage.setItem(this.tasteKey, next);
 					this.taste.value = next;
@@ -130,7 +140,7 @@ export class ExecutionPanel {
 				} catch (error) {
 					this.status.textContent = `학습 후보 저장 실패: ${String(error)}`;
 				}
-			} }, "학습 후보를 취향에 반영") : null));
+			} }, "선택한 후보를 취향에 반영") : null));
 	}
 
 	private renderResult(): void {
@@ -157,9 +167,12 @@ export class ExecutionPanel {
 
 	private export(): void {
 		if (!this.run) return;
-		const url = URL.createObjectURL(new Blob([JSON.stringify(this.run, null, 2)], { type: "application/json" }));
-		const link = h("a", { href: url, download: `workflow-${this.run.planCallId}.json` });
-		link.click();
-		URL.revokeObjectURL(url);
+		void invoke<string | null>("save_text_file", { name: `workflow-${this.run.planCallId}.json`, content: JSON.stringify(this.run, null, 2) })
+			.then((path) => {
+				if (path) this.status.textContent = `근거를 저장했습니다: ${path}`;
+			})
+			.catch((error) => {
+				this.status.textContent = `내보내기 실패: ${String(error)}`;
+			});
 	}
 }

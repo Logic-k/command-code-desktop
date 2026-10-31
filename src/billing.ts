@@ -224,14 +224,18 @@ export function usageOf(billing: Billing, now = Date.now()): Usage {
 	const add = (key: "fiveHour" | "daily" | "weekly", label: string) => {
 		const window = limits?.[key];
 		if (!window || !window.cap) return;
-		const used = window.used ?? 0;
+		const resetAt = epochMs(window.resetAt);
+		// Billing is fetched now and then; past its reset time the window is
+		// empty again even though the last answer still says it is full.
+		const reset = resetAt !== null && resetAt <= now;
+		const used = reset ? 0 : (window.used ?? 0);
 		const entry: UsageWindow = {
 			label,
 			used,
 			cap: window.cap,
 			percent: Math.min(100, (used / window.cap) * 100),
-			resetAt: epochMs(window.resetAt),
-			exceeded: window.exceeded === true || limits?.exceeded === key || used >= window.cap,
+			resetAt: reset ? null : resetAt,
+			exceeded: !reset && (window.exceeded === true || limits?.exceeded === key || used >= window.cap),
 		};
 		windows.push(entry);
 		if (entry.exceeded && (!exceeded || limits?.exceeded === key)) exceeded = entry;

@@ -21,8 +21,21 @@ use crate::updates::strip_ansi;
 const DIST: &str = "https://nodejs.org/dist";
 /// The oldest Node the CLI runs on.
 const MIN_NODE_MAJOR: u64 = 22;
+/// npm spec for the CLI: 1.88.0-1.88.1 crash on the first launch after a
+/// fresh install (fixed in 1.88.2).
+const CLI_SPEC: &str = "command-code@>=1.88.2";
 
 static BUSY: AtomicBool = AtomicBool::new(false);
+
+/// HTTP with deadlines: a stalled connection fails the setup (and frees it
+/// for a retry) instead of hanging it. The read deadline is per read, so a
+/// slow but moving download still finishes.
+fn http() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(20))
+        .timeout_read(std::time::Duration::from_secs(60))
+        .build()
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,7 +126,7 @@ fn latest_lts(platform: &str) -> Result<String, String> {
         Some(("darwin", arch)) => format!("osx-{arch}-tar"),
         _ => format!("{platform}-zip"),
     };
-    let index: Vec<serde_json::Value> = ureq::get(&format!("{DIST}/index.json"))
+    let index: Vec<serde_json::Value> = http().get(&format!("{DIST}/index.json"))
         .call()
         .map_err(|e| format!("Node.js 버전 목록을 받지 못했습니다: {e}"))?
         .into_json()
@@ -134,7 +147,7 @@ fn latest_lts(platform: &str) -> Result<String, String> {
 
 /// Download `url` to `dest`, reporting progress; returns the file's SHA-256.
 fn download(url: &str, dest: &Path, log: &Channel<String>) -> Result<String, String> {
-    let response = ureq::get(url).call().map_err(|e| format!("{url}: {e}"))?;
+    let response = http().get(url).call().map_err(|e| format!("{url}: {e}"))?;
     let total: Option<u64> = response.header("Content-Length").and_then(|v| v.parse().ok());
     let mut reader = response.into_reader();
     let mut file = std::fs::File::create(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
@@ -180,7 +193,7 @@ fn install_node(root: &Path, log: &Channel<String>) -> Result<(), String> {
     let file = format!("{name}.{ext}");
     let url = format!("{DIST}/{version}/{file}");
 
-    let sums = ureq::get(&format!("{DIST}/{version}/SHASUMS256.txt"))
+    let sums = http().get(&format!("{DIST}/{version}/SHASUMS256.txt"))
         .call()
         .map_err(|e| format!("체크섬 목록을 받지 못했습니다: {e}"))?
         .into_string()
@@ -232,10 +245,10 @@ fn install_cli(root: &Path, log: &Channel<String>) -> Result<(), String> {
         .join("bin")
         .join("npm-cli.js");
     let prefix = root.join("cli");
-    let _ = log.send("$ npm install -g command-code".into());
+    let _ = log.send(format!("$ npm install -g {CLI_SPEC}"));
     let mut cmd = Command::new(&node);
     cmd.arg(&npm_cli)
-        .args(["install", "-g", "command-code", "--no-fund", "--no-audit", "--loglevel", "warn", "--prefix"])
+        .args(["install", "-g", CLI_SPEC, "--no-fund", "--no-audit", "--loglevel", "warn", "--prefix"])
         .arg(&prefix)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

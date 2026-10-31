@@ -217,3 +217,30 @@ export function transcriptUpdates(jsonl: string): SessionUpdate[] {
 	}
 	return updates;
 }
+
+/** A conversation as Markdown for sharing or notes: messages in full, tools as
+ * one line each (with the command when there is one), thinking left out. */
+export function transcriptMarkdown(updates: SessionUpdate[], title: string): string {
+	const out: string[] = [`# ${title}`, ""];
+	let role: "user" | "agent" | null = null;
+	const start = (next: "user" | "agent") => {
+		if (role === next) return;
+		out.push("", next === "user" ? "## 사용자" : "## 에이전트", "");
+		role = next;
+	};
+	for (const update of updates) {
+		if (update.sessionUpdate === "user_message_chunk" || update.sessionUpdate === "agent_message_chunk") {
+			start(update.sessionUpdate === "user_message_chunk" ? "user" : "agent");
+			if (update.content.type === "text") out.push(update.content.text);
+			else if (update.content.type === "image") out.push("_(이미지)_");
+		} else if (update.sessionUpdate === "tool_call") {
+			start("agent");
+			const command = (update.rawInput as { command?: unknown } | undefined)?.command;
+			const status = update.status === "failed" ? " — 실패" : "";
+			out.push("", `- 도구 · ${update.title ?? update.kind ?? "tool"}${status}`);
+			if (typeof command === "string" && command.trim()) out.push("", "  ```sh", ...command.split("\n").map((l) => `  ${l}`), "  ```");
+			out.push("");
+		}
+	}
+	return `${out.join("\n").replace(/\n{3,}/g, "\n\n").trim()}\n`;
+}

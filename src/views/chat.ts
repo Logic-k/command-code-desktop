@@ -9,7 +9,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AcpError, type AcpConnection } from "../acp/client";
 import * as pool from "../acp/pool";
-import { transcriptUpdates } from "../acp/transcript";
+import { transcriptMarkdown, transcriptUpdates } from "../acp/transcript";
 import type {
 	AvailableCommand,
 	ConfigOption,
@@ -42,7 +42,7 @@ import {
 } from "../ui/markdown";
 import { keys } from "../ui/platform";
 import { DESKTOP_COMMANDS, ExecutionPanel } from "../ui/execution";
-import { executeWorkflow, type WorkflowNode, type WorkflowRun } from "../workflow";
+import { executeWorkflow, type NodeResult, type WorkflowNode, type WorkflowRun } from "../workflow";
 
 export interface ChatHost {
 	settings(): Settings;
@@ -125,10 +125,26 @@ const RISK_LABEL: Record<string, string> = {
 	"outside-workspace": "작업 폴더 밖 접근",
 	"ask-rule": "permissions.ask 규칙에 걸린 호출",
 	"permission-config": "권한 설정 변경",
+	"sensitive-file": "민감한 파일 접근 (비밀키·자격 증명 등)",
 };
 
-/** In bypass mode, how long a risky request waits before the app allows it. */
+/** In bypass mode, how long a question waits before the app picks its first answer. */
 const BYPASS_COUNTDOWN_SECONDS = 5;
+
+/** Tool kinds a read-only workflow role may not be granted; `switch_mode`
+ * would take it out of plan mode. */
+const WRITE_KINDS = new Set(["edit", "delete", "move", "switch_mode"]);
+
+/** Who answers a session's permission requests. The main chat follows its live
+ * mode; a workflow role gets a policy fixed when it starts, never the chat's. */
+interface PermissionPolicy {
+	/** Plain requests are allowed and questions answered without the user (bypass). */
+	autoAnswer: () => boolean;
+	/** A read-only role: requests to change files are refused, not shown. */
+	readOnly: boolean;
+	/** Shown on the card, e.g. the workflow role that asks. */
+	origin?: string;
+}
 
 const MODE_LABEL: Record<string, string> = {
 	default: "표준 (매번 확인)",
@@ -204,7 +220,7 @@ export class ChatView {
 	private thought: TextSegment | null = null;
 	private userBubble: TextSegment | null = null;
 	private readonly tools = new Map<string, ToolEntry>();
-	private readonly permissions: { card: HTMLElement; resolve: (o: PermissionOutcome) => void }[] = [];
+	private readonly permissions: { card: HTMLElement; sessionId: string; resolve: (o: PermissionOutcome) => void }[] = [];
 	private commands: AvailableCommand[] = [];
 	private modes: SessionMode[] = [];
 	private currentMode = "default";
@@ -218,6 +234,9 @@ export class ChatView {
 	/** The user closed the graph; agent updates keep the panel closed until a new plan. */
 	private dagDismissed = false;
 	private slashIndex = 0;
+	/** Project file paths for `@` mentions, listed on first use and every 30 s after. */
+	private files: { paths: string[]; at: number } | null = null;
+	private filesLoading = false;
 	private previewTimer: number | null = null;
 	/** Composer preview: chips per formula or the whole draft as a document; "off" lasts until the input is cleared. */
 	private previewMode: "auto" | "chips" | "doc" | "off" = "auto";
@@ -280,6 +299,7 @@ export class ChatView {
 			this.accountChip,
 			this.ulwChip,
 			h("span", { class: "spacer" }),
+			h("button", { class: "icon-btn", type: "button", title: "대화를 Markdown으로 내보내기", onclick: () => void this.exportMarkdown() }, svg(icons.copy)),
 			this.modeSelect,
 			this.modelSelect,
 			this.effortSelect,
@@ -309,7 +329,7 @@ export class ChatView {
 		this.input = h("textarea", {
 			class: "composer-input",
 			rows: 1,
-			placeholder: "무엇을 할까요?  ( / 명령 · 이미지 붙여넣기 )",
+			placeholder: "무엇을 할까요?  ( / 명령 · @ 파일 · 이미지 붙여넣기 )",
 			spellcheck: false,
 		});
 		this.input.addEventListener("input", () => this.onInput());
@@ -393,6 +413,26 @@ export class ChatView {
 		else this.input.focus();
 	}
 
+	/** Save the conversation as a .md file. Read from the CLI's transcript, which
+	 * it writes as the turn goes, so it holds everything the log shows. */
+	private async exportMarkdown(): Promise<void> {
+		const jsonl = this.sessionId
+			? await invoke<string | null>("read_transcript", { sessionId: this.sessionId, profileDir: null }).catch(() => null)
+			: null;
+		const updates = jsonl ? transcriptUpdates(jsonl) : [];
+		if (!updates.length) {
+			this.appendNote("내보낼 대화 기록이 아직 없습니다.", "notice");
+			return;
+		}
+		const safe = this.title.replace(/[\\/:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "conversation";
+		try {
+			const path = await invoke<string | null>("save_text_file", { name: `${safe}.md`, content: transcriptMarkdown(updates, this.title) });
+			if (path) this.appendNote(`대화를 저장했습니다: ${path}`);
+		} catch (error) {
+			this.flash(`내보내기 실패: ${describeError(error)}`);
+		}
+	}
+
 	private showExecution(show: boolean): void {
 		this.root.classList.toggle("execution-open", show);
 		this.execution.root.classList.toggle("hidden", !show);
@@ -415,7 +455,7 @@ export class ChatView {
 		this.execution.setActive(true);
 		this.startTurnUi();
 		try {
-			await executeWorkflow(run, (node, prompt, signal) => this.executeWorkflowNode(connection, node, prompt, signal, config, mode),
+			await executeWorkflow(run, (node, prompt, signal) => this.executeWorkflowNode(connection, run, node, prompt, signal, config, mode),
 				() => this.execution.update(run), controller.signal);
 			this.appendNote(`워크플로: ${run.objective} · ${run.status} · 반복 ${run.iteration}/${run.maxIterations}. 실행 탭에서 결과를 확인하세요.`);
 			this.host.attention(run.status === "passed" ? "done" : "error", run.verification || run.status);
@@ -433,27 +473,45 @@ export class ChatView {
 	}
 
 	private async executeWorkflowNode(
-		connection: AcpConnection, node: WorkflowNode, prompt: string, signal: AbortSignal,
+		connection: AcpConnection, run: WorkflowRun, node: WorkflowNode, prompt: string, signal: AbortSignal,
 		config: ConfigOption[], mode: string,
-	): Promise<string> {
+	): Promise<NodeResult> {
 		signal.throwIfAborted();
 		const state = await connection.request<SessionState>("session/new", { cwd: this.cwd, mcpServers: [] });
 		const sessionId = state.sessionId;
+		// A coding run's verifier must run the tests, which plan mode forbids; it
+		// stays read-only through its permission policy. Other read-only roles
+		// stay in plan mode. The mode is the chat's at launch, not its live one.
+		const codingVerifier = node.id.startsWith("verify-") && (run.kind === "build" || run.kind === "taste");
+		const wantedMode = codingVerifier
+			? (mode === "bypass" || mode === "dont-ask" ? mode : "default")
+			: node.readOnly ? "plan" : mode;
+		const policy: PermissionPolicy = { autoAnswer: () => wantedMode === "bypass", readOnly: node.readOnly, origin: node.label };
 		let output = "";
-		const cancel = () => connection.notify("session/cancel", { sessionId });
+		const tools = new Map<string, { kind?: string; title?: string; status?: string }>();
+		const cancel = () => {
+			connection.notify("session/cancel", { sessionId });
+			// A sibling's failure aborts this role too: its open cards would never be answered.
+			for (const pending of this.permissions.filter((item) => item.sessionId === sessionId)) pending.resolve({ outcome: "cancelled" });
+		};
 		signal.addEventListener("abort", cancel, { once: true });
 		const detach = connection.attach(sessionId, {
 			onUpdate: (update) => {
 				if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") output += update.content.text;
+				if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+					const seen = tools.get(update.toolCallId) ?? {};
+					tools.set(update.toolCallId, {
+						kind: update.kind ?? seen.kind, title: update.title ?? seen.title, status: update.status ?? seen.status,
+					});
+				}
 			},
 			onPermission: (request) => {
 				this.showExecution(false);
-				return this.onPermission(request);
+				return this.onPermission(request, policy);
 			},
 		});
 		try {
 			signal.throwIfAborted();
-			const wantedMode = node.readOnly ? "plan" : mode;
 			if (!state.modes?.availableModes.some((item) => item.id === wantedMode)) {
 				throw new Error(`필요한 권한 모드를 에이전트가 제공하지 않습니다: ${wantedMode}`);
 			}
@@ -466,12 +524,15 @@ export class ChatView {
 			const result = await connection.request<PromptResult>("session/prompt", { sessionId, prompt: [{ type: "text", text: prompt }] });
 			signal.throwIfAborted();
 			if (result.stopReason !== "end_turn") throw new Error(`노드가 완료되지 않았습니다: ${result.stopReason}`);
-			return output;
+			const receipts = [...tools.values()].filter((tool) => tool.status === "completed")
+				.map((tool) => `${tool.kind ?? "other"}: ${tool.title ?? "도구"}`);
+			return { output, receipts };
 		} finally {
 			signal.removeEventListener("abort", cancel);
 			detach();
 			if (connection.alive && connection.info?.agentCapabilities.sessionCapabilities?.close) {
-				await connection.request("session/close", { sessionId });
+				// The node's result stands even if the agent fails to close the session.
+				await connection.request("session/close", { sessionId }).catch(() => undefined);
 			}
 		}
 	}
@@ -805,7 +866,7 @@ export class ChatView {
 		if (!this.sessionId || modeId === this.currentMode) return;
 		if (modeId === "bypass") {
 			const ok = await ask(
-				`모든 권한 확인을 건너뜁니다. 에이전트가 묻지 않고 파일을 지우거나 명령을 실행할 수 있습니다.\n\nCLI가 이 모드에서도 묻는 위험한 요청(작업 폴더 밖 삭제 등)은 ${BYPASS_COUNTDOWN_SECONDS}초 뒤 자동으로 허용하고, 에이전트의 질문은 ${BYPASS_COUNTDOWN_SECONDS}초 뒤 첫 번째 답을 고릅니다. 그 사이에 멈출 수 있습니다.\n\n이 대화에서만 켜시겠습니까?`,
+				`모든 권한 확인을 건너뜁니다. 에이전트가 묻지 않고 파일을 지우거나 명령을 실행할 수 있습니다.\n\nCLI가 이 모드에서도 묻는 위험한 요청(작업 폴더 밖 삭제, 민감한 파일 등)은 자동으로 허용하지 않고 알림으로 확인을 요청합니다. 에이전트의 질문은 ${BYPASS_COUNTDOWN_SECONDS}초 뒤 첫 번째 답을 고르며, 그 사이에 멈출 수 있습니다.\n\n이 대화에서만 켜시겠습니까?`,
 				{ title: "권한 무시 모드", kind: "warning", okLabel: "켜기", cancelLabel: "취소" },
 			);
 			if (!ok) {
@@ -1176,7 +1237,9 @@ export class ChatView {
 		return this.currentMode === "bypass" || (this.currentMode === "plan" && this.planFromBypass);
 	}
 
-	private onPermission(request: PermissionRequest): Promise<PermissionOutcome> {
+	private readonly chatPolicy: PermissionPolicy = { autoAnswer: () => this.answersForUser, readOnly: false };
+
+	private onPermission(request: PermissionRequest, policy: PermissionPolicy = this.chatPolicy): Promise<PermissionOutcome> {
 		this.closeSegments();
 		this.markContent();
 		const known = this.tools.get(request.toolCall.toolCallId)?.data;
@@ -1184,19 +1247,27 @@ export class ChatView {
 		const question = isQuestion(request);
 		const risk = request._meta?.risk;
 		const labels = optionLabels(request, question);
+		const origin = policy.origin ? `${policy.origin} · ` : "";
+
+		if (policy.readOnly && !question && tool.kind && WRITE_KINDS.has(tool.kind)) {
+			const reject = request.options.find((o) => o.kind === "reject_once") ?? request.options.find((o) => o.kind.startsWith("reject"));
+			this.appendNote(`${origin}읽기 전용 역할의 변경 요청을 거부했습니다: ${displayTitle(tool, this.cwd)}`, "notice");
+			return Promise.resolve(reject ? { outcome: "selected", optionId: reject.optionId } : { outcome: "cancelled" });
+		}
 
 		// Bypass mode: the CLI still asks for risky calls, for a few tools of its
 		// own (enter_plan_mode) and questions. Plain requests are allowed here at
-		// once; risky ones and questions (first answer, usually the recommended
-		// one) after a short countdown the user can stop.
-		const autoPick = !this.answersForUser
+		// once and questions get their first answer (usually the recommended one)
+		// after a short countdown the user can stop. A risky call is the CLI
+		// saying "a person must decide": the app never answers it.
+		const autoPick = risk || !policy.autoAnswer()
 			? undefined
 			: question
 				? request.options[0]
 				: (request.options.find((o) => o.kind === "allow_once") ??
 					request.options.find((o) => o.kind.startsWith("allow")));
-		if (autoPick && !question && !risk) {
-			this.appendNote(`권한 무시 모드 · 자동 허용: ${displayTitle(tool, this.cwd)}`);
+		if (autoPick && !question) {
+			this.appendNote(`${origin}권한 무시 모드 · 자동 허용: ${displayTitle(tool, this.cwd)}`);
 			return Promise.resolve({ outcome: "selected", optionId: autoPick.optionId });
 		}
 
@@ -1254,7 +1325,7 @@ export class ChatView {
 							h(
 								"div",
 								{ class: "perm-risk-note" },
-								"위험 표시가 붙은 요청은 CLI가 '항상 허용'을 주지 않고 권한 무시 모드에서도 묻습니다.",
+								"위험 표시가 붙은 요청은 CLI가 '항상 허용'을 주지 않고 권한 무시 모드에서도 묻습니다. 앱도 자동으로 허용하지 않으니 직접 선택하세요.",
 							),
 						),
 					)
@@ -1285,7 +1356,7 @@ export class ChatView {
 					"div",
 					{ class: "perm-head" },
 					svg(question ? icons.chat : icons.shield),
-					h("span", null, question ? "질문" : "권한 요청"),
+					h("span", null, `${origin}${question ? "질문" : "권한 요청"}`),
 					h(
 						"span",
 						{ class: "perm-title", title: tool.title ?? "" },
@@ -1298,7 +1369,7 @@ export class ChatView {
 				actions,
 			);
 			this.log.appendChild(card);
-			this.permissions.push({ card, resolve: (outcome) => done(outcome, "취소됨") });
+			this.permissions.push({ card, sessionId: request.sessionId, resolve: (outcome) => done(outcome, "취소됨") });
 			this.scrollToBottom(true);
 
 			if (autoPick && auto) {
@@ -1311,7 +1382,7 @@ export class ChatView {
 				let left = BYPASS_COUNTDOWN_SECONDS;
 				const tick = () => {
 					// Leaving bypass mode while it counts down hands the choice back.
-					if (!this.answersForUser) return stopCountdown();
+					if (!policy.autoAnswer()) return stopCountdown();
 					if (left <= 0) {
 						return done(
 							{ outcome: "selected", optionId: autoPick.optionId },
@@ -1323,9 +1394,8 @@ export class ChatView {
 				};
 				tick();
 				countdown = window.setInterval(tick, 1000);
-				return;
 			}
-			this.host.attention("permission", tool.title ?? "권한이 필요합니다");
+			this.host.attention("permission", `${origin}${tool.title ?? "권한이 필요합니다"}`);
 		});
 	}
 
@@ -1616,15 +1686,76 @@ export class ChatView {
 			.slice(0, 50);
 	}
 
+	/** `@query` right before the cursor, at the start or after whitespace. */
+	private mentionAt(): { start: number; query: string } | null {
+		const before = this.input.value.slice(0, this.input.selectionStart ?? this.input.value.length);
+		const match = /(^|\s)@([^\s@]*)$/.exec(before);
+		return match ? { start: before.length - match[2].length - 1, query: match[2].toLowerCase() } : null;
+	}
+
+	/** Project files whose path contains the query; file-name matches first. */
+	private fileMatches(query: string): string[] {
+		if (!this.files || Date.now() - this.files.at > 30_000) {
+			this.loadFiles();
+			if (!this.files) return [];
+		}
+		const name = (path: string) => path.slice(path.lastIndexOf("/") + 1).toLowerCase();
+		return this.files.paths
+			.filter((path) => path.toLowerCase().includes(query))
+			.sort((a, b) => Number(!name(a).startsWith(query)) - Number(!name(b).startsWith(query)) || a.length - b.length)
+			.slice(0, 30);
+	}
+
+	private loadFiles(): void {
+		if (this.filesLoading) return;
+		this.filesLoading = true;
+		void invoke<string[]>("list_files", { cwd: this.cwd })
+			.then((paths) => {
+				this.files = { paths, at: Date.now() };
+				if (!this.disposed) this.renderSlash();
+			})
+			.catch(() => {
+				this.files = { paths: [], at: Date.now() };
+			})
+			.finally(() => {
+				this.filesLoading = false;
+			});
+	}
+
+	private completeMention(start: number, path: string): void {
+		const value = this.input.value;
+		const end = this.input.selectionStart ?? value.length;
+		const insert = `@${path} `;
+		this.input.value = value.slice(0, start) + insert + value.slice(end);
+		const cursor = start + insert.length;
+		this.input.setSelectionRange(cursor, cursor);
+		this.slashMenu.classList.add("hidden");
+		this.input.focus();
+		this.input.dispatchEvent(new Event("input"));
+	}
+
+	/** The composer's popup: slash commands, or project files after `@`. */
+	private menuItems(): { label: string; desc: string; pick: () => void }[] {
+		const commands = this.slashMatches();
+		if (commands.length) {
+			return commands.map((command) => ({ label: `/${command.name}`, desc: command.description, pick: () => this.completeSlash(command) }));
+		}
+		const mention = this.mentionAt();
+		if (!mention) return [];
+		return this.fileMatches(mention.query).map((path) => ({
+			label: `@${path}`, desc: "", pick: () => this.completeMention(mention.start, path),
+		}));
+	}
+
 	private renderSlash(): void {
-		const matches = this.slashMatches();
+		const matches = this.menuItems();
 		if (!matches.length) {
 			this.slashMenu.classList.add("hidden");
 			return;
 		}
 		this.slashIndex = Math.min(this.slashIndex, matches.length - 1);
 		this.slashMenu.replaceChildren(
-			...matches.map((command, index) =>
+			...matches.map((item, index) =>
 				h(
 					"button",
 					{
@@ -1632,11 +1763,11 @@ export class ChatView {
 						type: "button",
 						onmousedown: (event: Event) => {
 							event.preventDefault();
-							this.completeSlash(command);
+							item.pick();
 						},
 					},
-					h("span", { class: "slash-name" }, `/${command.name}`),
-					h("span", { class: "slash-desc" }, command.description),
+					h("span", { class: "slash-name" }, item.label),
+					item.desc ? h("span", { class: "slash-desc" }, item.desc) : null,
 				),
 			),
 		);
@@ -1653,7 +1784,7 @@ export class ChatView {
 
 	private onKeyDown(event: KeyboardEvent): void {
 		if (event.isComposing) return; // Korean IME: Enter confirms the syllable.
-		const matches = this.slashMenu.classList.contains("hidden") ? [] : this.slashMatches();
+		const matches = this.slashMenu.classList.contains("hidden") ? [] : this.menuItems();
 		if (matches.length) {
 			if (event.key === "ArrowDown" || event.key === "ArrowUp") {
 				event.preventDefault();
@@ -1664,7 +1795,7 @@ export class ChatView {
 			}
 			if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
 				event.preventDefault();
-				this.completeSlash(matches[this.slashIndex]);
+				matches[this.slashIndex].pick();
 				return;
 			}
 			if (event.key === "Escape") {

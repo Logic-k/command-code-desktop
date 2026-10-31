@@ -93,8 +93,11 @@ Rust는 **바이트 운반만** 한다. JSON-RPC 해석은 전부 TypeScript에�
 - 에이전트 출력은 모두 DOMPurify를 거친 뒤 렌더링한다(마크다운 안의 HTML·스크립트 차단).
 - 권한 모드 기본값은 `default`(매번 묻기). `bypass`는 빨간 경고와 함께만 선택 가능.
 - `bypass`에서도 CLI(1.88)는 `_meta.risk`가 붙은 요청(`destructive-command`, `outside-workspace`, `ask-rule`,
-  `permission-config`)과 `enter_plan_mode`는 묻는다. 위험 요청에는 "항상" 선택지가 없다. 앱은 이 모드에서 위험 표시 없는
-  요청은 바로, 위험 요청은 5초 카운트다운 뒤 `allow_once`로 답한다(멈출 수 있음, 모드를 바꾸면 멈춤).
+  `permission-config`, `sensitive-file`)과 `enter_plan_mode`는 묻는다. 위험 요청에는 "항상" 선택지가 없다. 앱은 이 모드에서 위험 표시 없는
+  요청은 바로 `allow_once`로 답하고, 위험 요청은 자동으로 답하지 않는다(2026-11-01부터: CLI가 사람의 결정을 요구한 호출이므로
+  카드와 알림으로 사용자에게 넘긴다).
+  워크플로 역할 세션은 채팅의 실시간 모드가 아니라 시작 시 고정한 정책(`PermissionPolicy`)으로 답한다. 읽기 전용 역할의
+  `edit`/`delete`/`move`/`switch_mode` 요청은 `reject_once`로 거부한다.
   `ask_user_question`은 옵션 id `option_N`, kind 전부 `allow_once`인 권한 요청으로 오므로 질문 카드로 따로 그린다. 이 모드에서는
   질문도 같은 카운트다운 뒤 첫 번째 답을 고른다(CLI가 추천 답을 앞에 둔다. 계획 모드 질문이면 "Yes (Recommended)").
   에이전트가 `bypass`에서 계획 모드로 들어가면(`current_mode_update`) 계획 승인 질문("Yes, auto-accept edits")도 같은 식으로

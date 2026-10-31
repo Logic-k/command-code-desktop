@@ -131,6 +131,9 @@ pub fn acp_spawn(
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut buffer = Vec::with_capacity(64 * 1024);
+        // The webview stopped listening (reloaded, window closed) while the
+        // agent still runs: nobody can talk to it any more.
+        let mut orphaned = false;
         loop {
             buffer.clear();
             match reader.read_until(b'\n', &mut buffer) {
@@ -142,12 +145,19 @@ pub fn acp_spawn(
                         continue;
                     }
                     if on_message.send(line.to_string()).is_err() {
+                        orphaned = true;
                         break;
                     }
                 }
             }
         }
         let agent = manager_handle.0.lock().ok().and_then(|mut map| map.remove(&id));
+        if orphaned {
+            // Waiting would block on an agent that never exits on its own.
+            if let Some(agent) = &agent {
+                agent.kill_tree();
+            }
+        }
         let code = agent
             .and_then(|agent| agent.child.lock().ok().and_then(|mut child| child.wait().ok()))
             .and_then(|status| status.code());

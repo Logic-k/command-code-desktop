@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod acp;
 pub mod billing;
+pub mod files;
 pub mod launch;
 pub mod procs;
 pub mod pty;
@@ -68,6 +69,8 @@ pub fn run() {
             launch::dir_exists,
             launch::read_transcript,
             launch::read_image,
+            files::list_files,
+            files::save_text_file,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
