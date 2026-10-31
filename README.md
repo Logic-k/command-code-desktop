@@ -114,11 +114,7 @@ pnpm install
 pnpm tauri dev
 ```
 
-배포용 빌드 (설치 파일은 `src-tauri/target/release/bundle/`):
-
-```bash
-pnpm tauri build
-```
+배포용 설치 파일(Windows `-setup.exe`, macOS `.dmg`)은 GitHub Actions가 만듭니다. `v0.5.0`처럼 버전 태그를 올리면 두 설치 파일이 모두 Releases 초안에 붙습니다. 태그 없이 한 번만 만들어 보려면 **Actions → Build → Run workflow**를 누르고, 끝나면 그 실행의 **Artifacts**에서 내려받습니다. (로컬에서 직접 만들려면 `pnpm tauri build --bundles nsis`, 결과는 `src-tauri/target/release/bundle/nsis/`)
 
 폴더를 바로 열기:
 
@@ -128,9 +124,9 @@ cmdc-gui.exe D:\project
 
 ## macOS
 
-맥용 앱은 GitHub Actions에서 만듭니다(맥 앱은 맥에서만 빌드되기 때문). Apple Silicon과 Intel 맥 모두에서 돌아가는 universal `.dmg` 하나가 나옵니다.
+맥용 앱도 Windows 설치 파일과 같은 GitHub Actions 워크플로(**Build**)에서 만듭니다(맥 앱은 맥에서만 빌드되기 때문). Apple Silicon과 Intel 맥 모두에서 돌아가는 universal `.dmg` 하나가 나옵니다.
 
-**받기**: 저장소의 **Actions → Build macOS → 최신 실행 → Artifacts**에서 `Command-Code-Desktop-macOS`를 내려받습니다. 직접 새로 만들려면 같은 화면에서 **Run workflow**를 누릅니다. `v0.5.0`처럼 버전 태그를 올리면 Releases에 초안으로도 붙습니다.
+**받기**: **Releases**에서 `.dmg`를 내려받습니다. 태그 없이 새로 만들려면 **Actions → Build → Run workflow**를 누르고, 끝나면 그 실행의 **Artifacts**에서 `Command-Code-Desktop-macOS`를 받습니다.
 
 **설치와 첫 실행**: 이 앱은 Apple 개발자 서명이 없어서(ad-hoc 서명만 됨) 처음 열 때 macOS가 막습니다.
 
