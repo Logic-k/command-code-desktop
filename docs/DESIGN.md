@@ -221,3 +221,27 @@ WebView2 디버그 포트(`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugg
 - 이미지 드래그 앤 드롭 외 파일 첨부(@멘션 → `resource_link`)
 - 세션 포크/되감기 (ACP 미노출, TUI로 대체 중)
 - 자동 업데이트, 설치 프로그램 서명
+
+## 8. 실행 탭과 연구 워크플로 (2026-10-31)
+
+기존 `src/styles.css`의 dark/light 색상, `--sans`, `--mono`, `--radius`,
+chip/select/button 스타일을 재사용한다. 새 브랜드나 시각 효과는 도입하지 않는다.
+Primary action: 목표와 워크플로를 선택한 뒤 실행 시작.
+Information priorities: 실행 상태와 반복 횟수, 의존 그래프, 선택한 노드의 전체 결과.
+Required content: 채팅/실행 탭, 연구/팀/연구 후 구현/taste 선택, 목표,
+최대 반복, 취향 편집·저장, 시작/중지, 근거 내보내기, 실패 이유, 기존 ULW 그래프.
+No decorative metrics; no invented token counts or progress events.
+
+Layout: 실행 탭 - bounded tool workspace -> scroll-body-shell (existing chat shell);
+scroll owner: .execution-panel; graph-only horizontal scroll: .execution-graph;
+anti-patterns: document scrolling, nested vertical scrollbars, hidden permission prompts.
+The fixed chat header and tabs remain outside the panel. At narrow widths controls
+wrap and graph remains an explicitly labeled two-dimensional viewport; node output
+wraps instead of forcing page overflow. Tabs and fields have accessible names.
+Native minimum window width remains 760px; web panel stress-check also uses 390px.
+
+The app owns research stages and a bounded verify/correct loop. Independent research
+roles use separate ACP sessions in parallel, in plan mode. Implementation roles run
+only in workflows explicitly labeled as modifying code. New sessions copy the selected
+model and effort and never select another provider. Local taste is project-scoped
+browser storage, not model training and not silent modification of user taste files.

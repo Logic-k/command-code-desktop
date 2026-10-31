@@ -315,7 +315,7 @@ export function layoutUlw(run: UlwRun): DagLayout {
 	return { width, height, boxes, edges };
 }
 
-export function renderUlwCanvas(run: UlwRun): HTMLElement {
+export function renderUlwCanvas(run: UlwRun, select?: (node: UlwNode) => void): HTMLElement {
 	if (!run.nodes.length) return h("div", { class: "dag-empty" }, "계획 등록을 기다리는 중…");
 	const layout = layoutUlw(run);
 	const canvas = h("div", {
@@ -348,9 +348,12 @@ export function renderUlwCanvas(run: UlwRun): HTMLElement {
 			.join("\n");
 		canvas.appendChild(
 			h(
-				"div",
+				"button",
 				{
 					class: `dag-node st-${node.status}`,
+					type: "button",
+					"aria-label": `${node.id}: ${node.label} (${node.status})`,
+					onclick: () => select?.(node),
 					style: `left:${x}px;top:${y}px;width:${NODE_W}px;height:${NODE_H}px`,
 					title,
 					"data-node": node.id,

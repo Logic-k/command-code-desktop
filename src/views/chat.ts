@@ -41,6 +41,8 @@ import {
 	wireMarkdown,
 } from "../ui/markdown";
 import { keys } from "../ui/platform";
+import { DESKTOP_COMMANDS, ExecutionPanel } from "../ui/execution";
+import { executeWorkflow, type WorkflowNode, type WorkflowRun } from "../workflow";
 
 export interface ChatHost {
 	settings(): Settings;
@@ -176,6 +178,10 @@ export class ChatView {
 	private readonly planBox: HTMLElement;
 	private readonly dagBox: HTMLElement;
 	private readonly dagBody: HTMLElement;
+	private readonly execution: ExecutionPanel;
+	private readonly chatTab: HTMLButtonElement;
+	private readonly executionTab: HTMLButtonElement;
+	private executionAbort: AbortController | null = null;
 	private readonly ulwChip: HTMLButtonElement;
 	private readonly input: HTMLTextAreaElement;
 	private readonly sendBtn: HTMLButtonElement;
@@ -329,6 +335,23 @@ export class ChatView {
 		this.slashMenu = h("div", { class: "slash hidden" });
 		this.queueChip = h("span", { class: "queue hidden" });
 		this.statusLine = h("span", { class: "composer-status" });
+		this.execution = new ExecutionPanel(this.cwd, {
+			start: (run) => void this.runWorkflow(run),
+			cancel: () => this.cancel(),
+		});
+		this.chatTab = h("button", { class: "chip", type: "button", role: "tab", "aria-selected": "true",
+			onclick: () => this.showExecution(false) }, "채팅");
+		this.executionTab = h("button", { class: "chip", type: "button", role: "tab", "aria-selected": "false",
+			onclick: () => this.showExecution(true) }, "실행");
+		const viewTabs = h("nav", { class: "execution-tabs", role: "tablist", "aria-label": "대화 보기" },
+			this.chatTab, this.executionTab);
+		viewTabs.addEventListener("keydown", (event) => {
+			if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+			event.preventDefault();
+			const execution = event.key === "End" || (event.key !== "Home" && document.activeElement === this.chatTab);
+			this.showExecution(execution);
+			(execution ? this.executionTab : this.chatTab).focus();
+		});
 
 		const composer = h(
 			"div",
@@ -351,7 +374,9 @@ export class ChatView {
 			"section",
 			{ class: "chat" },
 			head,
+			viewTabs,
 			this.banner,
+			this.execution.root,
 			this.dagBox,
 			h("div", { class: "chat-body" }, this.scroller, this.jumpBtn),
 			this.planBox,
@@ -364,7 +389,91 @@ export class ChatView {
 	}
 
 	focus(): void {
-		this.input.focus();
+		if (this.root.classList.contains("execution-open")) this.executionTab.focus();
+		else this.input.focus();
+	}
+
+	private showExecution(show: boolean): void {
+		this.root.classList.toggle("execution-open", show);
+		this.execution.root.classList.toggle("hidden", !show);
+		this.chatTab.setAttribute("aria-selected", String(!show));
+		this.executionTab.setAttribute("aria-selected", String(show));
+		this.chatTab.tabIndex = show ? -1 : 0;
+		this.executionTab.tabIndex = show ? 0 : -1;
+	}
+
+	private async runWorkflow(run: WorkflowRun): Promise<void> {
+		if (this.busy || !this.ready || this.disposed) {
+			this.execution.showError("연결이 준비되고 현재 작업이 끝난 뒤 실행하세요.");
+			return;
+		}
+		const controller = new AbortController();
+		this.executionAbort = controller;
+		const connection = this.connection;
+		const config = this.configOptions.filter((option) => option.category === "model" || option.category === "thought_level" || option.id === "model" || option.id === "effort");
+		const mode = this.currentMode;
+		this.execution.setActive(true);
+		this.startTurnUi();
+		try {
+			await executeWorkflow(run, (node, prompt, signal) => this.executeWorkflowNode(connection, node, prompt, signal, config, mode),
+				() => this.execution.update(run), controller.signal);
+			this.appendNote(`워크플로: ${run.objective} · ${run.status} · 반복 ${run.iteration}/${run.maxIterations}. 실행 탭에서 결과를 확인하세요.`);
+			this.host.attention(run.status === "passed" ? "done" : "error", run.verification || run.status);
+		} finally {
+			this.executionAbort = null;
+			this.execution.setActive(false);
+			this.finishTurnUi();
+			if (this.rebindPending) void this.rebind();
+			else {
+				const next = this.queue.shift();
+				this.renderQueue();
+				if (next !== undefined && !this.disposed) void this.send(next);
+			}
+		}
+	}
+
+	private async executeWorkflowNode(
+		connection: AcpConnection, node: WorkflowNode, prompt: string, signal: AbortSignal,
+		config: ConfigOption[], mode: string,
+	): Promise<string> {
+		signal.throwIfAborted();
+		const state = await connection.request<SessionState>("session/new", { cwd: this.cwd, mcpServers: [] });
+		const sessionId = state.sessionId;
+		let output = "";
+		const cancel = () => connection.notify("session/cancel", { sessionId });
+		signal.addEventListener("abort", cancel, { once: true });
+		const detach = connection.attach(sessionId, {
+			onUpdate: (update) => {
+				if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") output += update.content.text;
+			},
+			onPermission: (request) => {
+				this.showExecution(false);
+				return this.onPermission(request);
+			},
+		});
+		try {
+			signal.throwIfAborted();
+			const wantedMode = node.readOnly ? "plan" : mode;
+			if (!state.modes?.availableModes.some((item) => item.id === wantedMode)) {
+				throw new Error(`필요한 권한 모드를 에이전트가 제공하지 않습니다: ${wantedMode}`);
+			}
+			await connection.request("session/set_mode", { sessionId, modeId: wantedMode });
+			for (const option of config) {
+				signal.throwIfAborted();
+				await connection.request("session/set_config_option", { sessionId, configId: option.id, value: option.currentValue });
+			}
+			signal.throwIfAborted();
+			const result = await connection.request<PromptResult>("session/prompt", { sessionId, prompt: [{ type: "text", text: prompt }] });
+			signal.throwIfAborted();
+			if (result.stopReason !== "end_turn") throw new Error(`노드가 완료되지 않았습니다: ${result.stopReason}`);
+			return output;
+		} finally {
+			signal.removeEventListener("abort", cancel);
+			detach();
+			if (connection.alive && connection.info?.agentCapabilities.sessionCapabilities?.close) {
+				await connection.request("session/close", { sessionId });
+			}
+		}
 	}
 
 	// ----------------------------------------------------------- lifecycle
@@ -554,6 +663,7 @@ export class ChatView {
 	}
 
 	dispose(): void {
+		this.executionAbort?.abort();
 		this.disposed = true;
 		if (this.busy && this.sessionId) this.connection.notify("session/cancel", { sessionId: this.sessionId });
 		for (const pending of this.permissions.splice(0)) pending.resolve({ outcome: "cancelled" });
@@ -1253,6 +1363,7 @@ export class ChatView {
 		const next = applyUlwTool(this.ulw, tool);
 		if (next === this.ulw) return;
 		this.ulw = next;
+		if (next) this.execution.observe(next);
 		if (kind === "plan") {
 			this.dagDismissed = false;
 			this.dagBox.classList.remove("hidden", "collapsed");
@@ -1499,7 +1610,7 @@ export class ChatView {
 		const value = this.input.value;
 		if (!value.startsWith("/") || /\s/.test(value)) return [];
 		const query = value.slice(1).toLowerCase();
-		return this.commands
+		return [...DESKTOP_COMMANDS, ...this.commands]
 			.filter((c) => c.name.toLowerCase().includes(query))
 			.sort((a, b) => Number(!a.name.toLowerCase().startsWith(query)) - Number(!b.name.toLowerCase().startsWith(query)))
 			.slice(0, 50);
@@ -1661,6 +1772,15 @@ export class ChatView {
 
 	private submit(): void {
 		const text = this.input.value.trim();
+		const desktop = text.match(/^\/desktop-(research|team|build|taste)(?:\s+([\s\S]*))?$/);
+		if (desktop) {
+			const kind = desktop[1] === "research" ? "research" : desktop[1] === "team" ? "team" : desktop[1] === "build" ? "build" : "taste";
+			this.showExecution(true);
+			this.execution.open(kind, desktop[2] ?? "");
+			this.input.value = "";
+			this.onInput();
+			return;
+		}
 		if (!text && !this.attachments.length) return;
 		if (this.busy || !this.ready) {
 			if (!text) return;
@@ -1735,6 +1855,11 @@ export class ChatView {
 	}
 
 	cancel(): void {
+		if (this.executionAbort) {
+			this.executionAbort.abort();
+			for (const pending of [...this.permissions]) pending.resolve({ outcome: "cancelled" });
+			return;
+		}
 		if (!this.busy || !this.sessionId) return;
 		this.connection.notify("session/cancel", { sessionId: this.sessionId });
 		for (const pending of [...this.permissions]) pending.resolve({ outcome: "cancelled" });
