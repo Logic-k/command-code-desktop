@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { createWorkflow, learningCandidates, WORKFLOWS, workflowKind, type WorkflowKind, type WorkflowRun } from "../workflow";
+import { campaignSlug, createWorkflow, learningCandidates, RESEARCH_TYPES, WORKFLOWS, workflowKind, type ResearchBrief, type WorkflowKind, type WorkflowRun } from "../workflow";
 import { renderUlwCanvas, type UlwRun } from "./dag";
 import { h } from "./dom";
 
@@ -11,6 +11,15 @@ export const DESKTOP_COMMANDS = [
 ];
 const STATUS = { ready: "준비", running: "실행 중", passed: "에이전트 검증 통과", failed: "실패", cancelled: "중지됨" };
 
+function lines(text: string): string[] {
+	return text.split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+function localDate(): string {
+	const now = new Date();
+	return `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+}
+
 export class ExecutionPanel {
 	readonly root: HTMLElement;
 	private readonly kind = h("select", { class: "select", "aria-label": "워크플로" },
@@ -18,8 +27,17 @@ export class ExecutionPanel {
 	private readonly objective = h("textarea", { class: "execution-objective", rows: 2, "aria-label": "실행 목표", placeholder: "조사하거나 제작할 목표와 완료 기준" });
 	private readonly iterations = h("input", { type: "number", min: 1, max: 5, value: 2, "aria-label": "최대 반복 횟수" });
 	private readonly taste = h("textarea", { class: "execution-objective", rows: 4, "aria-label": "프로젝트 취향", placeholder: "예: 기존 패턴 우선, 의존성 최소화, 한국어 문서, 성능은 측정 후 최적화" });
+	private readonly decision = h("input", { type: "text", class: "execution-objective", "aria-label": "결정 질문", placeholder: "이 리서치로 무엇을 결정하려 하나요 (한 문장)" });
+	private readonly typeBoxes = RESEARCH_TYPES.map(() => h("input", { type: "checkbox" }));
+	private readonly constraints = h("textarea", { class: "execution-objective", rows: 3, "aria-label": "제약", placeholder: "한 줄에 하나. 예: Tauri 유지, GPL 금지" });
+	private readonly known = h("textarea", { class: "execution-objective", rows: 3, "aria-label": "이미 아는 것", placeholder: "한 줄에 하나" });
+	private readonly doneWhen = h("textarea", { class: "execution-objective", rows: 3, "aria-label": "완료 기준", placeholder: "한 줄에 하나. 예: 후보 3개 이상 비교표" });
+	private readonly maxSources = h("input", { type: "number", min: 5, max: 100, value: 30, "aria-label": "최대 출처" });
+	private readonly campaign = h("input", { type: "text", class: "execution-objective", "aria-label": "캠페인 폴더", placeholder: "비우면 날짜-결정질문(없으면 목표) 슬러그. 같은 이름이면 다음 사이클" });
+	private readonly brief: HTMLDetailsElement;
 	private readonly description = h("p", { class: "execution-description" });
 	private readonly status = h("p", { class: "execution-status", role: "status", "aria-live": "polite" });
+	private readonly saved = h("p", { class: "execution-status" });
 	private readonly graph = h("div", { class: "execution-graph", tabindex: 0, "aria-label": "실행 의존 그래프" });
 	private readonly graphLabel = h("h3", null, "실행 미리보기");
 	private readonly results = h("div", { class: "execution-results" });
@@ -40,6 +58,17 @@ export class ExecutionPanel {
 		this.tasteKey = `commandcode:taste:${cwd}`;
 		this.taste.value = localStorage.getItem(this.tasteKey) ?? "";
 		this.kind.addEventListener("change", () => this.describe());
+		for (const box of this.typeBoxes) box.addEventListener("change", () => this.describe());
+		this.brief = h("details", null, h("summary", null, "리서치 브리프"),
+			h("p", { class: "execution-description" }, "유형을 하나 이상 고르면 유형별 조사 역할이 추가되고 결과가 프로젝트의 .research/<캠페인>/ 폴더에 저장됩니다. 고르지 않으면 목표 한 줄로 실행합니다."),
+			h("label", { class: "execution-field" }, "결정 질문", this.decision),
+			h("ul", { class: "execution-candidates" }, RESEARCH_TYPES.map((type, index) =>
+				h("li", null, h("label", { title: type.question }, this.typeBoxes[index], ` ${type.id} ${type.name}`)))),
+			h("label", { class: "execution-field" }, "제약", this.constraints),
+			h("label", { class: "execution-field" }, "이미 아는 것", this.known),
+			h("label", { class: "execution-field" }, "완료 기준", this.doneWhen),
+			h("div", { class: "execution-controls" }, h("label", null, "최대 출처 ", this.maxSources)),
+			h("label", { class: "execution-field" }, "캠페인 폴더", this.campaign));
 		const save = h("button", { type: "button", class: "btn", onclick: () => {
 			try {
 				localStorage.setItem(this.tasteKey, this.taste.value);
@@ -58,12 +87,13 @@ export class ExecutionPanel {
 				h("label", null, "최대 반복 ", this.iterations)),
 			this.description,
 			h("label", { class: "execution-field" }, "목표 · 완료 기준", this.objective),
+			this.brief,
 			h("details", null, h("summary", null, "프로젝트 Taste"),
 				h("p", null, "저장한 취향을 각 역할에 전달합니다. 모델 학습이 아닙니다. 기존 taste 파일은 변경하지 않습니다."),
 				this.taste, save),
-			h("p", { class: "execution-description" }, "현재 Command Code 계정·선택 모델을 사용합니다. 역할마다 추론이 발생합니다. 조사 역할은 계획 모드, 구현은 시작할 때의 권한 모드, 코딩 검증은 표준 모드(권한 무시 중이면 그대로)로 실행하며 읽기 전용 역할의 변경 요청은 거부합니다. 검증은 그 세션에서 실제로 완료된 도구 호출 기록이 있어야 통과합니다. 앱 종료 후 자동 재개되지 않습니다."),
+			h("p", { class: "execution-description" }, "현재 Command Code 계정·선택 모델을 사용합니다. 역할마다 추론이 발생합니다. 조사 역할은 묻지 않기 모드(없으면 계획 모드), 구현은 시작할 때의 권한 모드, 코딩 검증은 표준 모드(권한 무시 중이면 그대로)로 실행하며 읽기 전용 역할의 변경 요청은 거부하고 변경 도구를 실행한 역할은 실패 처리합니다. 역할의 질문에는 앱이 바로 답합니다(계획 모드 전환은 거절, 나머지는 추천 답, 없으면 첫 답). 검증은 그 세션에서 실제로 완료된 도구 호출 기록이 있어야 통과합니다. 앱 종료 후 자동 재개되지 않습니다."),
 			h("div", { class: "execution-controls" }, this.start, this.stop, this.exportButton),
-			this.status, this.graphLabel, this.graph, this.results, this.learning, this.observed,
+			this.status, this.saved, this.graphLabel, this.graph, this.results, this.learning, this.observed,
 		);
 		this.describe();
 	}
@@ -80,18 +110,42 @@ export class ExecutionPanel {
 		const kind = workflowKind(this.kind.value);
 		const item = WORKFLOWS.find((entry) => entry.id === kind);
 		this.description.textContent = item?.description ?? "";
+		this.brief.hidden = kind === "taste";
 		if (kind && !this.run) {
-			const preview = createWorkflow(kind, "미리보기", this.taste.value, 1);
+			let preview: WorkflowRun;
+			try {
+				preview = createWorkflow(kind, "미리보기", this.taste.value, 1, this.buildBrief("미리보기"));
+			} catch {
+				preview = createWorkflow(kind, "미리보기", this.taste.value, 1);
+			}
 			this.graph.replaceChildren(renderUlwCanvas(preview));
 		}
+	}
+
+	/** null keeps the one-line flow: no type checked, or the taste workflow. */
+	private buildBrief(objective: string): ResearchBrief | null {
+		if (workflowKind(this.kind.value) === "taste") return null;
+		const types = RESEARCH_TYPES.filter((_, index) => this.typeBoxes[index].checked).map((type) => type.id);
+		if (!types.length) return null;
+		const decision = this.decision.value.trim();
+		return {
+			decision,
+			types,
+			constraints: lines(this.constraints.value),
+			known: lines(this.known.value),
+			doneWhen: lines(this.doneWhen.value),
+			maxSources: this.maxSources.valueAsNumber,
+			campaign: this.campaign.value.trim() || campaignSlug(localDate(), decision || objective),
+		};
 	}
 
 	private begin(): void {
 		const kind = workflowKind(this.kind.value);
 		if (!kind || this.active) return;
 		try {
-			this.run = createWorkflow(kind, this.objective.value, this.taste.value, this.iterations.valueAsNumber);
+			this.run = createWorkflow(kind, this.objective.value, this.taste.value, this.iterations.valueAsNumber, this.buildBrief(this.objective.value));
 			this.selected = null;
+			this.saved.textContent = "";
 			this.host.start(this.run);
 		} catch (error) {
 			this.status.textContent = error instanceof Error ? error.message : String(error);
@@ -104,6 +158,16 @@ export class ExecutionPanel {
 		this.start.disabled = active;
 		this.stop.disabled = !active;
 		this.kind.disabled = this.objective.disabled = this.iterations.disabled = this.taste.disabled = active;
+		for (const input of [this.decision, this.constraints, this.known, this.doneWhen, this.maxSources, this.campaign, ...this.typeBoxes]) input.disabled = active;
+	}
+
+	/** Kept apart from the status line so later update() calls of the same run do not wipe it. */
+	showSaved(path: string): void {
+		this.saved.textContent = `리서치 파일 저장: ${path}`;
+	}
+
+	showSaveError(message: string): void {
+		this.saved.textContent = message;
 	}
 
 	update(run: WorkflowRun): void {

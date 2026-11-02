@@ -71,6 +71,7 @@ pub fn run() {
             launch::read_image,
             files::list_files,
             files::save_text_file,
+            files::research_save,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

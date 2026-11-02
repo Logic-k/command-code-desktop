@@ -18,7 +18,7 @@ let pending: { id: number; sessionId: string }[] = [];
 const asked = new Map<string, (outcome: unknown) => void>();
 let askSeq = 0;
 const state = () => ({
-	modes: { currentModeId: "default", availableModes: [{ id: "default", name: "표준" }, { id: "plan", name: "계획" }, { id: "bypass", name: "권한 무시" }] },
+	modes: { currentModeId: "default", availableModes: [{ id: "default", name: "표준" }, { id: "plan", name: "계획" }, { id: "bypass", name: "권한 무시" }, { id: "dont-ask", name: "묻지 않기" }] },
 	configOptions: [
 		{ id: "model", category: "model", name: "모델", type: "select", currentValue: "offline-peer", options: [{ value: "offline-peer", name: "OFFLINE QA · 추론 없음" }] },
 		{ id: "effort", name: "추론 강도", type: "select", currentValue: "high", options: [{ value: "high", name: "high" }] },
@@ -26,14 +26,21 @@ const state = () => ({
 });
 const outcomes: unknown[] = [];
 /** The agent asks the client for permission; resolves with the client's outcome. */
-const ask = (sessionId: string, toolCall: object, meta?: object) => new Promise<unknown>((resolve) => {
+const ask = (sessionId: string, toolCall: object, meta?: object, options?: object[]) => new Promise<unknown>((resolve) => {
 	const id = `perm-${++askSeq}`;
 	asked.set(id, resolve);
 	channel.onmessage(JSON.stringify({ jsonrpc: "2.0", id, method: "session/request_permission", params: {
 		sessionId, toolCall, _meta: meta,
-		options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }],
+		options: options ?? [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }],
 	} }));
 });
+/** A CLI question (ask_user_question, exit_plan_mode's approval): answers are
+ * `option_N` permission options of kind allow_once, as `cmd acp` sends them. */
+const question = (sessionId: string, title: string, labels: string[]) => {
+	const toolCallId = `question-${askSeq + 1}`;
+	return ask(sessionId, { toolCallId, title, kind: "other", rawInput: { options: labels } }, undefined,
+		labels.map((label, index) => ({ optionId: `option_${index + 1}`, name: label, kind: "allow_once" })));
+};
 const reply = (id: number, result: unknown) => channel.onmessage(JSON.stringify({ jsonrpc: "2.0", id, result }));
 const update = (sessionId: string, value: object) => channel.onmessage(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: value } }));
 const peer = async (method: string, args: Record<string, unknown>) => {
@@ -83,6 +90,35 @@ const peer = async (method: string, args: Record<string, unknown>) => {
 				// A read-only role asking to write: the app must refuse it unseen.
 				outcomes.push(await ask(params.sessionId, { toolCallId: `edit-${nodeId}`, title: "Edit: src/main.ts", kind: "edit" }));
 			}
+			if (peerMode === "allowed-write" && !verifier) {
+				// dont-ask runs what the user's allow rules permit without asking.
+				update(params.sessionId, { sessionUpdate: "tool_call", toolCallId: `write-${nodeId}`, title: "Edit: src/main.ts", kind: "edit", status: "completed" });
+			}
+			if (peerMode === "nag" && !verifier) {
+				// A role that never stops asking: the app must give up on it.
+				for (let round = 0; round < 8; round += 1) {
+					const outcome = await question(params.sessionId, "Next step: 무엇을 할까요?", ["더 조사", "형식 변경"]);
+					outcomes.push(outcome);
+					if ((outcome as { outcome?: string } | undefined)?.outcome === "cancelled") break;
+				}
+			}
+			if (peerMode === "live" && !verifier) {
+				// What a live CLI role did: narrate, call a tool, ask to leave plan
+				// mode, then ask what to change.
+				update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "I'll check the sources first." } });
+				update(params.sessionId, { sessionUpdate: "tool_call", toolCallId: `fetch-${nodeId}`, title: "Fetch: https://example.org", kind: "fetch", status: "completed" });
+				outcomes.push(await question(params.sessionId, "Exit Plan: Exit plan mode and begin implementation?",
+					["Yes, auto-accept edits: Exit plan mode and implement", "Cancel: Stay in plan mode — run /plans to annotate"]));
+				outcomes.push(await question(params.sessionId, "Next step: 무엇을 조정할까요?", ["범위 확장", "현재 내용으로 충분 (Recommended)"]));
+				outcomes.push(await question(params.sessionId, "Enter plan mode?", ["Yes (Recommended)", "No"]));
+				if (nodeId === "synthesis") {
+					output = `${output}\n\n\`\`\`json\n${JSON.stringify({
+						claims: [{ id: "C1", text: "QA claim", type: "R4", supports: ["S1"], refutes: [], status: "confirmed" }],
+						sources: [{ id: "S1", url: "https://example.org", title: "QA", checkedAt: "2026-11-02", grade: "P1" }],
+						openQuestions: [],
+					})}\n\`\`\``;
+				}
+			}
 			if (verifier) {
 				verifyCount += 1;
 				// The command the verifier ran, as the app sees it in the session.
@@ -93,6 +129,8 @@ const peer = async (method: string, args: Record<string, unknown>) => {
 					evidence: ["Offline peer transport receipt"],
 					issues: peerMode === "retry" && verifyCount === 1 ? ["QA: repeat verification"] : [],
 				});
+				// Live verifiers narrate before the verdict.
+				if (peerMode === "live") output = `I'll independently verify the key claims.${output}`;
 			}
 			update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: output } });
 			reply(message.id, { stopReason: "end_turn" });

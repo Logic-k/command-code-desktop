@@ -42,7 +42,7 @@ import {
 } from "../ui/markdown";
 import { keys } from "../ui/platform";
 import { DESKTOP_COMMANDS, ExecutionPanel } from "../ui/execution";
-import { executeWorkflow, type NodeResult, type WorkflowNode, type WorkflowRun } from "../workflow";
+import { executeWorkflow, researchFiles, type NodeResult, type WorkflowNode, type WorkflowRun } from "../workflow";
 
 export interface ChatHost {
 	settings(): Settings;
@@ -144,7 +144,12 @@ interface PermissionPolicy {
 	readOnly: boolean;
 	/** Shown on the card, e.g. the workflow role that asks. */
 	origin?: string;
+	/** A workflow role: no one is watching, so the app answers its questions. */
+	unattended?: boolean;
 }
+
+/** A role that keeps asking after this many answered questions is stuck. */
+const MAX_ROLE_QUESTIONS = 4;
 
 const MODE_LABEL: Record<string, string> = {
 	default: "표준 (매번 확인)",
@@ -458,6 +463,7 @@ export class ChatView {
 			await executeWorkflow(run, (node, prompt, signal) => this.executeWorkflowNode(connection, run, node, prompt, signal, config, mode),
 				() => this.execution.update(run), controller.signal);
 			this.appendNote(`워크플로: ${run.objective} · ${run.status} · 반복 ${run.iteration}/${run.maxIterations}. 실행 탭에서 결과를 확인하세요.`);
+			await this.saveResearch(run);
 			this.host.attention(run.status === "passed" ? "done" : "error", run.verification || run.status);
 		} finally {
 			this.executionAbort = null;
@@ -472,6 +478,19 @@ export class ChatView {
 		}
 	}
 
+	/** Never throws: a failed save must not skip runWorkflow's cleanup. */
+	private async saveResearch(run: WorkflowRun): Promise<void> {
+		try {
+			const files = researchFiles(run);
+			if (!run.brief || !files.length) return;
+			const path = await invoke<string>("research_save", { cwd: this.cwd, campaign: run.brief.campaign, files });
+			this.appendNote(`리서치 파일 저장: ${path}`);
+			this.execution.showSaved(path);
+		} catch (error) {
+			this.execution.showSaveError(`리서치 파일 저장 실패: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
 	private async executeWorkflowNode(
 		connection: AcpConnection, run: WorkflowRun, node: WorkflowNode, prompt: string, signal: AbortSignal,
 		config: ConfigOption[], mode: string,
@@ -479,15 +498,27 @@ export class ChatView {
 		signal.throwIfAborted();
 		const state = await connection.request<SessionState>("session/new", { cwd: this.cwd, mcpServers: [] });
 		const sessionId = state.sessionId;
-		// A coding run's verifier must run the tests, which plan mode forbids; it
-		// stays read-only through its permission policy. Other read-only roles
-		// stay in plan mode. The mode is the chat's at launch, not its live one.
+		// A coding run's verifier must run the tests, which read-only modes forbid;
+		// it stays read-only through its permission policy. Other read-only roles
+		// run in dont-ask: reads and fetches run, everything else is denied
+		// without a prompt. Plan mode is only the fallback for a CLI without it,
+		// since plan mode makes the agent end its turn by asking for plan approval.
+		// The mode is the chat's at launch, not its live one.
 		const codingVerifier = node.id.startsWith("verify-") && (run.kind === "build" || run.kind === "taste");
+		const offers = (id: string) => state.modes?.availableModes.some((item) => item.id === id) ?? false;
 		const wantedMode = codingVerifier
 			? (mode === "bypass" || mode === "dont-ask" ? mode : "default")
-			: node.readOnly ? "plan" : mode;
-		const policy: PermissionPolicy = { autoAnswer: () => wantedMode === "bypass", readOnly: node.readOnly, origin: node.label };
+			: node.readOnly ? (offers("dont-ask") ? "dont-ask" : "plan")
+				// A writer in plan mode could never leave it: no one approves the plan.
+				: mode === "plan" ? "default" : mode;
+		const policy: PermissionPolicy = {
+			autoAnswer: () => wantedMode === "bypass", readOnly: node.readOnly, origin: node.label, unattended: true,
+		};
 		let output = "";
+		/** A tool call ended the last message; the next one starts a new paragraph. */
+		let gap = false;
+		let questions = 0;
+		let stuck = false;
 		const tools = new Map<string, { kind?: string; title?: string; status?: string }>();
 		const cancel = () => {
 			connection.notify("session/cancel", { sessionId });
@@ -497,8 +528,16 @@ export class ChatView {
 		signal.addEventListener("abort", cancel, { once: true });
 		const detach = connection.attach(sessionId, {
 			onUpdate: (update) => {
-				if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") output += update.content.text;
+				if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+					// Messages around tool calls arrive as one stream; without a break a
+					// closing ``` and the next message's first words share a line.
+					if (gap && output && !output.endsWith("\n\n")) output += output.endsWith("\n") ? "\n" : "\n\n";
+					gap = false;
+					output += update.content.text;
+				}
 				if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+					// Only a new call: a status update can land mid-sentence.
+					if (update.sessionUpdate === "tool_call") gap = true;
 					const seen = tools.get(update.toolCallId) ?? {};
 					tools.set(update.toolCallId, {
 						kind: update.kind ?? seen.kind, title: update.title ?? seen.title, status: update.status ?? seen.status,
@@ -506,7 +545,13 @@ export class ChatView {
 				}
 			},
 			onPermission: (request) => {
-				this.showExecution(false);
+				if (isQuestion(request)) {
+					if (++questions > MAX_ROLE_QUESTIONS) {
+						stuck = true;
+						connection.notify("session/cancel", { sessionId });
+						return Promise.resolve({ outcome: "cancelled" });
+					}
+				} else this.showExecution(false);
 				return this.onPermission(request, policy);
 			},
 		});
@@ -523,9 +568,17 @@ export class ChatView {
 			signal.throwIfAborted();
 			const result = await connection.request<PromptResult>("session/prompt", { sessionId, prompt: [{ type: "text", text: prompt }] });
 			signal.throwIfAborted();
+			if (stuck) throw new Error(`역할이 사람의 답을 계속 요구해 중단했습니다 (질문 ${MAX_ROLE_QUESTIONS}회 초과).`);
 			if (result.stopReason !== "end_turn") throw new Error(`노드가 완료되지 않았습니다: ${result.stopReason}`);
 			const receipts = [...tools.values()].filter((tool) => tool.status === "completed")
 				.map((tool) => `${tool.kind ?? "other"}: ${tool.title ?? "도구"}`);
+			// dont-ask never asks, so it also runs what the user's allow rules permit;
+			// a read-only role that changed files anyway has broken its contract.
+			// (Plan mode's own plan-file write is the one change it may make.)
+			const wrote = node.readOnly && wantedMode !== "plan"
+				? [...tools.values()].find((tool) => tool.status === "completed" && tool.kind && WRITE_KINDS.has(tool.kind))
+				: undefined;
+			if (wrote) throw new Error(`읽기 전용 역할이 변경 도구를 실행했습니다: ${wrote.title ?? wrote.kind}`);
 			return { output, receipts };
 		} finally {
 			signal.removeEventListener("abort", cancel);
@@ -1253,6 +1306,25 @@ export class ChatView {
 			const reject = request.options.find((o) => o.kind === "reject_once") ?? request.options.find((o) => o.kind.startsWith("reject"));
 			this.appendNote(`${origin}읽기 전용 역할의 변경 요청을 거부했습니다: ${displayTitle(tool, this.cwd)}`, "notice");
 			return Promise.resolve(reject ? { outcome: "selected", optionId: reject.optionId } : { outcome: "cancelled" });
+		}
+
+		// A workflow role's question would wait for a person who is not there.
+		// A plan-mode switch is declined either way: leaving would start
+		// implementing in a read-only role, entering would strand an implementer
+		// behind an approval no one gives. Anything else gets the agent's
+		// recommended answer, else its first.
+		if (policy.unattended && question) {
+			const named = (index: number) => `${labels[index]?.label ?? ""} ${request.options[index].name}`.trim();
+			const indexes = request.options.map((_, index) => index);
+			// By the CLI's own prompts (exit_plan_mode's "Exit Plan: …" with its
+			// "Stay in plan mode" answer, enter_plan_mode's "Enter plan mode?"), not
+			// by any question that merely mentions plan mode.
+			const planSwitch = tool.kind === "switch_mode" || /^\s*(exit plan\b|enter plan mode)/i.test(tool.title ?? "") ||
+				request.options.some((option) => /stay in plan mode/i.test(option.name));
+			const index = (planSwitch ? indexes.find((i) => /stay in plan mode|^(no|cancel)\b/i.test(named(i))) : undefined) ??
+				indexes.find((i) => /\(recommended\)/i.test(named(i))) ?? 0;
+			this.appendNote(`${origin}자동 실행이라 앱이 답했습니다: ${tool.title ?? "질문"} → ${labels[index]?.label ?? request.options[index].name}`);
+			return Promise.resolve({ outcome: "selected", optionId: request.options[index].optionId });
 		}
 
 		// Bypass mode: the CLI still asks for risky calls, for a few tools of its
