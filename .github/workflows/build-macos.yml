@@ -1,10 +1,14 @@
-# Builds the macOS app (.dmg, universal: Apple Silicon + Intel).
+# Builds the installers: Windows (NSIS .exe) and macOS (.dmg, universal:
+# Apple Silicon + Intel).
 #
 # Run it from the Actions tab ("Run workflow"), or push a tag like v0.5.0 to
-# also attach the .dmg to a draft GitHub release. The app is ad-hoc signed,
-# not notarized: on first launch macOS asks to confirm opening it
-# (see README → macOS).
-name: Build macOS
+# also attach both installers to a draft GitHub release. The macOS app is
+# ad-hoc signed, not notarized: on first launch macOS asks to confirm opening
+# it (see README → macOS).
+#
+# The file keeps its original name (build-macos.yml) so existing links and
+# `gh workflow run build-macos.yml` keep working.
+name: Build
 
 on:
   workflow_dispatch:
@@ -70,3 +74,51 @@ jobs:
         with:
           draft: true
           files: ${{ steps.dmg.outputs.path }}
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build NSIS installer
+        run: pnpm tauri build --bundles nsis
+
+      - name: Collect artifacts
+        id: setup
+        shell: bash
+        run: |
+          exe=$(ls src-tauri/target/release/bundle/nsis/*-setup.exe | head -n 1)
+          echo "path=$exe" >> "$GITHUB_OUTPUT"
+          echo "Built: $exe ($(du -h "$exe" | cut -f1))"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Command-Code-Desktop-Windows
+          path: ${{ steps.setup.outputs.path }}
+          if-no-files-found: error
+
+      - name: Attach to a draft release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: ${{ steps.setup.outputs.path }}
