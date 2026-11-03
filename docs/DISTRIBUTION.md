@@ -15,8 +15,8 @@
 
 1. `src-tauri/tauri.conf.json`, `Cargo.toml`, `package.json`의 version을 올립니다.
 2. 태그 푸시 (`v0.6.0`) → `Build` 워크플로가 Windows NSIS + macOS DMG를 만들어 draft 릴리스에 붙입니다.
-3. 각 플랫폼의 업데이트 아티팩트:
-   - Windows: `*.nsis.zip` + `*.nsis.zip.sig`
+3. 각 플랫폼의 업데이트 아티팩트(로컬 `pnpm tauri build`는 `bundle/`에 생성):
+   - Windows: `*-setup.exe` + `.sig` (NSIS 인스톨러 자체가 업데이트 아티팩트; CI의 `.nsis.zip`도 동등하게 사용 가능)
    - macOS: `*.app.tar.gz` + `*.app.tar.gz.sig`
 4. `latest.json`을 만들어 릴리스에 올립니다:
 
@@ -34,6 +34,8 @@
    ```
 
    앱은 `releases/latest/download/latest.json`을 조회합니다(이미 config에 설정됨). 즉 `latest` 태그의 릴리스를 매번 갱신하거나, 최신 릴리스에 `latest.json`을 올리면 됩니다.
+
+   **주의(0.6.0 릴리스에서 확인)**: `gh release upload`는 자산명의 공백을 `.`로 치환합니다(`Command Code Desktop_…` → `Command.Code.Desktop_…`). `latest.json`의 `url`은 **업로드 후 실제 자산명**과 일치해야 합니다 — 스페이스를 `%20`으로 쓰면 404. 업로드 후 `gh release view <tag> --json assets --jq '.assets[].name'`로 확인하세요. 또 `releases/latest/download/` 경로는 CDN 캐시로 수 분간 이전 내용을 서빙할 수 있습니다.
 
 ## 3. SmartScreen/게이트키퍼
 
