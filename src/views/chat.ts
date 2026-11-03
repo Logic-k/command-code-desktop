@@ -14,6 +14,9 @@ import type {
 	AvailableCommand,
 	ConfigOption,
 	ContentBlock,
+	ElicitationOutcome,
+	ElicitationProperty,
+	ElicitationRequest,
 	PermissionOutcome,
 	PermissionRequest,
 	PlanEntry,
@@ -24,6 +27,8 @@ import type {
 	ToolCall,
 	ToolContent,
 } from "../acp/types";
+import { normalizeConfigOptions } from "../acp/types";
+import { allBackends, backendById, COMMAND_CODE, type AgentBackend } from "../backends";
 import { accountBlocker, type Billing, type Catalog, findModel, modelAccess } from "../billing";
 import type { Settings } from "../store";
 import { applyUlwTool, renderUlwCanvas, ulwToolKind, type UlwRun } from "../ui/dag";
@@ -40,7 +45,7 @@ import {
 	renderUserText,
 	wireMarkdown,
 } from "../ui/markdown";
-import { keys } from "../ui/platform";
+import { isWindows, keys } from "../ui/platform";
 import { DESKTOP_COMMANDS, ExecutionPanel } from "../ui/execution";
 import { executeWorkflow, researchFiles, type NodeResult, type WorkflowNode, type WorkflowRun } from "../workflow";
 
@@ -71,6 +76,8 @@ interface ChatOptions {
 	/** Saved account this chat runs as; null runs as the CLI's own login. */
 	accountId: string | null;
 	accountName: string;
+	/** Which agent backend runs this tab; undefined is Command Code. */
+	backendId?: string;
 }
 
 interface TextSegment {
@@ -168,14 +175,19 @@ const SUGGESTIONS = [
 
 const TOOL_TEXT_LIMIT = 6000;
 
-/** Update kinds `session/load` replays; skipped when the transcript already drew them. */
+/** Update kinds a resume replays; skipped when the transcript already drew them. */
 const REPLAYED = new Set([
 	"user_message_chunk",
 	"agent_message_chunk",
 	"agent_thought_chunk",
+	"user_message",
+	"agent_message",
+	"agent_thought",
 	"tool_call",
 	"tool_call_update",
+	"tool_call_content_chunk",
 	"plan",
+	"plan_update",
 ]);
 
 export class ChatView {
@@ -219,6 +231,8 @@ export class ChatView {
 	private readonly jumpBtn: HTMLButtonElement;
 	private readonly queueChip: HTMLElement;
 	private readonly accountChip: HTMLElement;
+	private readonly backendSelect: HTMLSelectElement;
+	private backendId: string;
 
 	// Conversation state
 	private message: TextSegment | null = null;
@@ -269,8 +283,13 @@ export class ChatView {
 		this.cwd = options.cwd;
 		this.sessionId = options.sessionId ?? null;
 		this.title = options.title ?? "새 대화";
-		this.connection = pool.acquire(this.cwd, options.accountId);
+		this.backendId = options.backendId ?? COMMAND_CODE.id;
+		this.connection = pool.acquire(this.cwd, options.accountId, this.backendId);
 
+		this.backendSelect = h("select", {
+			class: `select select-backend${allBackends().length > 1 ? "" : " hidden"}`, title: "에이전트 백엔드",
+		}, allBackends().map((b) => h("option", { value: b.id, title: b.note ?? b.name, ...(b.id === this.backendId ? { selected: "selected" } : {}) }, b.name)));
+		this.backendSelect.addEventListener("change", () => this.setBackend(this.backendSelect.value));
 		this.modeSelect = h("select", { class: "select hidden", title: "권한 모드 (Shift+Tab)" });
 		this.modelSelect = h("select", { class: "select select-model hidden", title: "모델" });
 		this.effortSelect = h("select", { class: "select hidden", title: "추론 강도" });
@@ -305,6 +324,7 @@ export class ChatView {
 			this.ulwChip,
 			h("span", { class: "spacer" }),
 			h("button", { class: "icon-btn", type: "button", title: "대화를 Markdown으로 내보내기", onclick: () => void this.exportMarkdown() }, svg(icons.copy)),
+			this.backendSelect,
 			this.modeSelect,
 			this.modelSelect,
 			this.effortSelect,
@@ -460,10 +480,29 @@ export class ChatView {
 		this.execution.setActive(true);
 		this.startTurnUi();
 		try {
+			if (run.isolate) {
+				try {
+					run.worktree = await invoke<{ path: string; root: string; branch: string }>(
+						"worktree_create", { root: this.cwd, name: run.objective });
+					run.workdir = run.worktree.path;
+					this.appendNote(`격리 실행: ${run.worktree.branch} (${run.worktree.path})`);
+				} catch (error) {
+					throw new Error(`격리 실행용 worktree를 만들지 못했습니다 (git 저장소가 아니면 프로젝트 폴더에서 바로 실행하려면 '격리 실행'을 끄세요): ${describeError(error)}`);
+				}
+			}
 			await executeWorkflow(run, (node, prompt, signal) => this.executeWorkflowNode(connection, run, node, prompt, signal, config, mode),
 				() => this.execution.update(run), controller.signal);
 			this.appendNote(`워크플로: ${run.objective} · ${run.status} · 반복 ${run.iteration}/${run.maxIterations}. 실행 탭에서 결과를 확인하세요.`);
 			await this.saveResearch(run);
+			if (run.worktree) {
+				try {
+					const changes = await invoke<{ branch: string; files: { path: string; status: string; added?: number | null; deleted?: number | null }[] }>(
+						"worktree_changes", { path: run.worktree.path });
+					this.execution.showChanges(run.worktree, changes);
+				} catch (error) {
+					this.execution.showSaveError(`변경 목록을 읽지 못했습니다: ${describeError(error)}`);
+				}
+			}
 			this.host.attention(run.status === "passed" ? "done" : "error", run.verification || run.status);
 		} finally {
 			this.executionAbort = null;
@@ -496,7 +535,7 @@ export class ChatView {
 		config: ConfigOption[], mode: string,
 	): Promise<NodeResult> {
 		signal.throwIfAborted();
-		const state = await connection.request<SessionState>("session/new", { cwd: this.cwd, mcpServers: [] });
+		const state = await connection.request<SessionState>("session/new", { cwd: run.workdir ?? this.cwd, mcpServers: [] });
 		const sessionId = state.sessionId;
 		// A coding run's verifier must run the tests, which read-only modes forbid;
 		// it stays read-only through its permission policy. Other read-only roles
@@ -521,12 +560,15 @@ export class ChatView {
 		let stuck = false;
 		const tools = new Map<string, { kind?: string; title?: string; status?: string }>();
 		const cancel = () => {
-			connection.notify("session/cancel", { sessionId });
+			connection.cancelSession(sessionId);
 			// A sibling's failure aborts this role too: its open cards would never be answered.
 			for (const pending of this.permissions.filter((item) => item.sessionId === sessionId)) pending.resolve({ outcome: "cancelled" });
 		};
 		signal.addEventListener("abort", cancel, { once: true });
 		const detach = connection.attach(sessionId, {
+			// An unattended role can never wait on a form or open a URL for a
+			// person who is not there; decline so the agent proceeds.
+			onElicitation: () => Promise.resolve({ action: "decline" }),
 			onUpdate: (update) => {
 				if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
 					// Messages around tool calls arrive as one stream; without a break a
@@ -548,7 +590,7 @@ export class ChatView {
 				if (isQuestion(request)) {
 					if (++questions > MAX_ROLE_QUESTIONS) {
 						stuck = true;
-						connection.notify("session/cancel", { sessionId });
+						connection.cancelSession(sessionId);
 						return Promise.resolve({ outcome: "cancelled" });
 					}
 				} else this.showExecution(false);
@@ -624,11 +666,12 @@ export class ChatView {
 				const sessionId = this.sessionId;
 				this.suppressReplay = rendered;
 				this.attachSession(sessionId);
-				const loaded = await connection.request<Omit<SessionState, "sessionId">>("session/load", {
-					sessionId,
-					cwd: this.cwd,
-					mcpServers: [],
-				});
+				// v2 prefers `session/resume` (same result, plus negotiated replay);
+				// a v1 agent only knows `session/load`.
+				const loaded = await connection.request<Omit<SessionState, "sessionId">>(
+					connection.canResume ? "session/resume" : "session/load",
+					{ sessionId, cwd: this.cwd, mcpServers: [] },
+				);
 				if (stale()) return closeOn(sessionId);
 				state = { sessionId, ...loaded };
 				this.suppressReplay = false;
@@ -686,6 +729,7 @@ export class ChatView {
 		this.detach = this.connection.attach(sessionId, {
 			onUpdate: (update) => this.onUpdate(update),
 			onPermission: (request) => this.onPermission(request),
+			onElicitation: (request) => this.onElicitation(request),
 		});
 	}
 
@@ -717,8 +761,36 @@ export class ChatView {
 		return this.connection.info?.protocolVersion;
 	}
 
+	private get backend(): AgentBackend {
+		return backendById(this.backendId, isWindows);
+	}
+
+	/** Custom agents have no account concept; the chip names the agent instead. */
 	private renderAccountChip(): void {
-		this.accountChip.replaceChildren(svg(icons.user), this.options.accountName);
+		const name = this.backend.builtin ? this.options.accountName : this.backend.name;
+		this.accountChip.replaceChildren(svg(icons.user), name);
+		this.accountChip.title = this.backend.builtin
+			? "이 대화가 쓰는 Command Code 계정. 사이드바에서 계정을 바꾸면 이 대화도 바로 따라갑니다."
+			: this.backend.note ?? this.backend.name;
+	}
+
+	/** Switch this tab to another ACP backend. Sessions do not port across
+	 * agents, so a switch is a fresh conversation on the new agent. */
+	setBackend(id: string): void {
+		if (id === this.backendId) return;
+		this.backendId = id;
+		this.options.backendId = id;
+		this.sessionId = null;
+		this.options.sessionId = undefined;
+		this.renderAccountChip();
+		if (this.busy) {
+			this.rebindPending = true;
+			this.setStatus(`이번 작업이 끝나면 ${this.backend.name} 에이전트로 전환합니다.`, true);
+			return;
+		}
+		this.log.replaceChildren();
+		this.hasContent = false;
+		void this.rebind();
 	}
 
 	/**
@@ -754,12 +826,12 @@ export class ChatView {
 		this.detachExit?.();
 		this.detachExit = null;
 		pool.release(this.connection);
-		this.connection = pool.acquire(this.cwd, this.options.accountId);
+		this.connection = pool.acquire(this.cwd, this.options.accountId, this.backendId);
 		this.hideBanner();
 		// History already on screen stays; an empty chat just starts over.
 		if (this.sessionId && this.hasContent) this.options.sessionId = this.sessionId;
 		else this.sessionId = null;
-		this.appendNote(this.rebindReason ?? `${this.options.accountName} 계정으로 다시 연결했습니다.`);
+		this.appendNote(this.rebindReason ?? `${this.backend.builtin ? `${this.options.accountName} 계정` : this.backend.name}으로 다시 연결했습니다.`);
 		this.rebindReason = null;
 		await this.open();
 	}
@@ -779,7 +851,7 @@ export class ChatView {
 	dispose(): void {
 		this.executionAbort?.abort();
 		this.disposed = true;
-		if (this.busy && this.sessionId) this.connection.notify("session/cancel", { sessionId: this.sessionId });
+		if (this.busy && this.sessionId) this.connection.cancelSession(this.sessionId);
 		for (const pending of this.permissions.splice(0)) pending.resolve({ outcome: "cancelled" });
 		if (this.sessionId && this.connection.alive) {
 			void this.connection.request("session/close", { sessionId: this.sessionId }).catch(() => undefined);
@@ -799,7 +871,7 @@ export class ChatView {
 			this.renderModes();
 		}
 		if (state.configOptions) {
-			this.configOptions = state.configOptions;
+			this.configOptions = normalizeConfigOptions(state.configOptions);
 			this.renderConfig();
 		}
 	}
@@ -882,6 +954,7 @@ export class ChatView {
 	/** Warn before a turn fails: the account can run nothing, or the chosen
 	 * model is not available to it. */
 	private checkAccess(): void {
+		if (!this.backend.builtin) return; // plan/allowance are Command Code concepts
 		const { billing, catalog } = this.host.access(this.options.accountId);
 		if (!billing) return;
 		const blocker = accountBlocker(billing);
@@ -946,7 +1019,7 @@ export class ChatView {
 				configId,
 				value,
 			});
-			if (result.configOptions?.length) this.configOptions = result.configOptions;
+			if (result.configOptions?.length) this.configOptions = normalizeConfigOptions(result.configOptions);
 		} catch (error) {
 			this.flash(`변경 실패: ${describeError(error)}`);
 		}
@@ -985,8 +1058,44 @@ export class ChatView {
 				this.closeSegments();
 				this.upsertTool(update);
 				break;
+			case "tool_call_content_chunk": {
+				const entry = this.tools.get(update.toolCallId);
+				if (entry) {
+					(entry.data.content ??= []).push({ type: "content", content: update.content });
+					this.renderTool(entry);
+				}
+				break;
+			}
+			case "user_message":
+				this.closeAgentSegments();
+				for (const block of update.content ?? []) this.appendUser(block);
+				break;
+			case "agent_message":
+				this.userBubble = null;
+				this.endThought();
+				for (const block of update.content ?? []) {
+					if (block.type === "text") this.appendText("message", block.text);
+				}
+				break;
+			case "agent_thought":
+				this.userBubble = null;
+				for (const block of update.content ?? []) {
+					if (block.type === "text") this.appendText("thought", block.text);
+				}
+				break;
 			case "plan":
-				this.renderPlan(update.entries);
+			case "plan_update":
+				this.renderPlan(update.entries ?? []);
+				break;
+			case "state_update":
+				if (update.state === "requires_action") this.setStatus("에이전트가 입력을 기다리는 중", true);
+				else if (update.state === "idle" && !this.busy) this.setStatus("");
+				break;
+			case "terminal_update":
+				this.upsertTerminal(update.terminalId, update.toolCallId, update.title, update.status);
+				break;
+			case "terminal_output_chunk":
+				this.upsertTerminal(update.terminalId, undefined, undefined, undefined, update.data);
 				break;
 			case "available_commands_update":
 				this.commands = update.availableCommands ?? [];
@@ -998,7 +1107,7 @@ export class ChatView {
 				this.renderModes();
 				break;
 			case "config_option_update":
-				this.configOptions = update.configOptions;
+				this.configOptions = normalizeConfigOptions(update.configOptions);
 				this.renderConfig();
 				break;
 			case "session_info_update":
@@ -1468,6 +1577,124 @@ export class ChatView {
 				countdown = window.setInterval(tick, 1000);
 			}
 			this.host.attention("permission", `${origin}${tool.title ?? "권한이 필요합니다"}`);
+		});
+	}
+
+	/** v2 agent-owned terminal: rendered as a read-only "execute" tool card
+	 * keyed `terminal:<id>` (or scoped to its owning tool call). */
+	private upsertTerminal(terminalId: string, toolCallId?: string, title?: string, status?: string, output?: string): void {
+		this.markContent();
+		const id = toolCallId ? `terminal:${toolCallId}:${terminalId}` : `terminal:${terminalId}`;
+		let entry = this.tools.get(id);
+		if (!entry) {
+			entry = { data: { toolCallId: id, kind: "execute", status: "in_progress" }, el: h("div", { class: "tool" }), open: false };
+			this.tools.set(id, entry);
+			this.log.appendChild(entry.el);
+		}
+		entry.data.title = title ?? entry.data.title ?? `터미널 ${terminalId}`;
+		if (status !== undefined) entry.data.status = status as ToolCall["status"];
+		if (output) {
+			const content = (entry.data.content ??= []);
+			const last = content[content.length - 1];
+			if (last?.type === "content" && last.content.type === "text") last.content.text += output;
+			else content.push({ type: "content", content: { type: "text", text: output } });
+		}
+		this.renderTool(entry);
+		this.scrollToBottom();
+	}
+
+	// ---------------------------------------------------------- elicitation
+
+	/** `elicitation/create` (v2): a form card, or a consent card that opens the
+	 * URL in the system browser. The card always resolves — never hangs. */
+	private onElicitation(request: ElicitationRequest): Promise<ElicitationOutcome> {
+		this.closeSegments();
+		this.markContent();
+		return new Promise<ElicitationOutcome>((resolve) => {
+			let card!: HTMLElement;
+			const done = (outcome: ElicitationOutcome, label: string) => {
+				card.classList.add("answered");
+				card.querySelector(".perm-actions")?.replaceWith(h("div", { class: "perm-answer" }, label));
+				resolve(outcome);
+				this.input.focus();
+			};
+			const actions = h("div", { class: "perm-actions" });
+			const body = h("div", { class: "perm-desc" });
+			const required = new Set(request.requestedSchema?.required ?? []);
+			const readField = (prop: ElicitationProperty, input: HTMLInputElement | HTMLSelectElement | HTMLElement) =>
+				() => {
+					if (input instanceof HTMLInputElement && input.type === "checkbox") return input.checked;
+					if (input instanceof HTMLElement && input.classList.contains("elic-multi")) {
+						return [...input.querySelectorAll<HTMLInputElement>("input:checked")].map((c) => c.value);
+					}
+					const value = (input as HTMLInputElement | HTMLSelectElement).value;
+					if (prop.type === "number" || prop.type === "integer") return value === "" ? undefined : Number(value);
+					return value;
+				};
+			const fields: { name: string; read: () => unknown }[] = [];
+			if (request.mode === "url") {
+				const url = request.url ?? "";
+				let host = "";
+				try { host = new URL(url).host; } catch { host = url; }
+				body.appendChild(h("div", { class: "elic-url" }, `브라우저에서 열 주소: ${host}`));
+				actions.append(
+					h("button", {
+						class: "btn primary", type: "button",
+						onclick: () => { if (url) void openUrl(url); done({ action: "accept" }, "동의하고 열었습니다"); },
+					}, "동의하고 열기"),
+					h("button", { class: "btn", type: "button", onclick: () => done({ action: "decline" }, "거절함") }, "거절"),
+				);
+			} else {
+				for (const [name, prop] of Object.entries(request.requestedSchema?.properties ?? {})) {
+					let input: HTMLInputElement | HTMLSelectElement | HTMLElement;
+					const options = prop.type === "string" ? prop.enum ?? prop.oneOf?.map((item) => item.const) : undefined;
+					const titles = prop.type === "string" ? new Map(prop.oneOf?.map((item) => [item.const, item.title ?? item.const])) : undefined;
+					if (options?.length) {
+						input = h("select", { class: "input elic-input" },
+							options.map((v) => h("option", { value: v, ...(prop.type === "string" && prop.default === v ? { selected: "selected" } : {}) }, titles?.get(v) ?? v)));
+					} else if (prop.type === "array" && prop.items?.enum?.length) {
+						const defaults = new Set(prop.default ?? []);
+						input = h("div", { class: "elic-multi" },
+							prop.items.enum.map((v) => h("label", { class: "elic-choice" },
+								h("input", { type: "checkbox", value: v, ...(defaults.has(v) ? { checked: "checked" } : {}) }), v)));
+					} else if (prop.type === "boolean") {
+						input = h("input", { type: "checkbox", class: "elic-check", ...(prop.default ? { checked: "checked" } : {}) });
+					} else if (prop.type === "number" || prop.type === "integer") {
+						input = h("input", { type: "number", class: "input elic-input", ...(prop.default !== undefined ? { value: String(prop.default) } : {}) });
+					} else {
+						input = h("input", {
+							type: "text", class: "input elic-input",
+							...(prop.type === "string" && prop.default !== undefined ? { value: prop.default } : {}),
+							...(prop.type === "string" && prop.pattern ? { pattern: prop.pattern } : {}),
+						});
+					}
+					fields.push({ name, read: readField(prop, input) });
+					body.appendChild(h("label", { class: "elic-field" },
+						h("span", { class: "elic-label" }, `${prop.title ?? name}${required.has(name) ? " *" : ""}`),
+						prop.description ? h("span", { class: "elic-desc" }, prop.description) : null, input));
+				}
+				if (!fields.length) body.appendChild(h("div", null, "추가 정보 없이 계속 진행할 수 있습니다."));
+				actions.append(
+					h("button", {
+						class: "btn primary", type: "button",
+						onclick: () => {
+							const content: Record<string, unknown> = {};
+							for (const field of fields) {
+								const value = field.read();
+								if (value !== undefined && value !== "") content[field.name] = value;
+							}
+							done({ action: "accept", content }, "보냈습니다");
+						},
+					}, "보내기"),
+					h("button", { class: "btn", type: "button", onclick: () => done({ action: "decline" }, "거절함") }, "거절"),
+				);
+			}
+			actions.append(h("button", { class: "btn ghost", type: "button", onclick: () => done({ action: "cancel" }, "취소함") }, "취소"));
+			card = h("div", { class: "perm elicit" },
+				h("div", { class: "perm-title" }, request.message ?? "에이전트가 입력을 요청했습니다"), body, actions);
+			this.log.appendChild(card);
+			this.scrollToBottom(true);
+			this.host.attention("permission", request.message ?? "에이전트의 입력 요청");
 		});
 	}
 
@@ -2064,7 +2291,7 @@ export class ChatView {
 			return;
 		}
 		if (!this.busy || !this.sessionId) return;
-		this.connection.notify("session/cancel", { sessionId: this.sessionId });
+		this.connection.cancelSession(this.sessionId);
 		for (const pending of [...this.permissions]) pending.resolve({ outcome: "cancelled" });
 		this.setStatus("중지하는 중…");
 	}

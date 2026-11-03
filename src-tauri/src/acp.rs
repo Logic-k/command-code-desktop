@@ -65,8 +65,17 @@ struct ExitPayload {
     code: Option<i32>,
 }
 
-/// Start `cmd acp` in `cwd`. Each stdout line (one JSON-RPC message) goes to
-/// `on_message`; each stderr line (the agent's own log) goes to `on_log`.
+/// A custom ACP agent (any stdio JSON-RPC program), e.g. codex-acp.
+/// Unlike the builtin CLI it inherits the user's environment so launchers
+/// like npx/uvx resolve, and no Command Code env vars are set.
+#[derive(serde::Deserialize)]
+pub struct AgentSpec {
+    program: String,
+    args: Vec<String>,
+}
+
+/// Start `cmd acp` — or a custom ACP agent — in `cwd`. Each stdout line (one
+/// JSON-RPC message) goes to `on_message`; each stderr line to `on_log`.
 #[tauri::command]
 pub fn acp_spawn(
     app: AppHandle,
@@ -75,6 +84,7 @@ pub fn acp_spawn(
     cwd: String,
     profile_dir: Option<String>,
     account_id: Option<String>,
+    agent: Option<AgentSpec>,
     on_message: Channel<String>,
     on_log: Channel<String>,
 ) -> Result<Launch, String> {
@@ -82,14 +92,28 @@ pub fn acp_spawn(
         return Err(format!("not a directory: {cwd}"));
     }
 
-    let launch = resolve_launch();
-    let mut cmd = Command::new(&launch.program);
-    cmd.args(&launch.prefix_args)
-        .arg("acp")
-        .current_dir(&cwd)
-        .env_clear()
-        .envs(child_env(profile_dir.as_deref(), account_id.as_deref())?)
-        .stdin(Stdio::piped())
+    let (launch, mut cmd) = if let Some(spec) = agent {
+        let launch = Launch {
+            program: spec.program.clone(),
+            prefix_args: spec.args.clone(),
+            via: "agent".to_string(),
+            entry: None,
+            version: None,
+        };
+        let mut cmd = Command::new(&spec.program);
+        cmd.args(&spec.args).current_dir(&cwd);
+        (launch, cmd)
+    } else {
+        let launch = resolve_launch();
+        let mut cmd = Command::new(&launch.program);
+        cmd.args(&launch.prefix_args)
+            .arg("acp")
+            .current_dir(&cwd)
+            .env_clear()
+            .envs(child_env(profile_dir.as_deref(), account_id.as_deref())?);
+        (launch, cmd)
+    };
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::procs::background(&mut cmd);

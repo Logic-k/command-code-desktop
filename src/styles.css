@@ -2704,3 +2704,45 @@ dialog {
 	font-family: var(--mono);
 	font-size: 0.9em;
 }
+
+/* --- session delete (ACP v2) --- */
+.session-del {
+	position: absolute; right: 4px; top: 4px; border: 0; background: transparent;
+	color: var(--muted, #8a8f98); cursor: pointer; font-size: 13px; padding: 0 4px;
+	border-radius: 4px; opacity: 0;
+}
+.session:hover .session-del, .session-del:focus { opacity: 1; }
+.session-del:hover { color: var(--danger, #e5534b); background: var(--hover, #22262e); }
+.session { position: relative; }
+
+/* --- elicitation cards --- */
+.perm.elicit .perm-desc { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.elic-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.elic-label { color: var(--muted, #8a8f98); }
+.elic-desc { color: var(--muted, #8a8f98); font-size: 11px; }
+.elic-input { width: 100%; }
+.elic-multi { display: flex; flex-wrap: wrap; gap: 10px; }
+.elic-choice { display: flex; gap: 6px; align-items: center; font-size: 12px; }
+.elic-check { width: 16px; height: 16px; }
+.elic-url { font-family: var(--mono, monospace); font-size: 12px; word-break: break-all; }
+
+/* --- backend registry (settings) --- */
+.settings-backends { border: 1px solid var(--border, #2a2f38); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.backend-list { display: flex; flex-direction: column; gap: 4px; }
+.backend-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.backend-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.backend-form { display: flex; gap: 6px; }
+.backend-form .text { flex: 1; min-width: 0; }
+.select-backend { max-width: 140px; }
+
+/* --- worktree changes --- */
+.execution-check { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted, #8a8f98); margin: 4px 0; }
+.execution-changes h3 { font-size: 13px; margin: 12px 0 6px; }
+.changes-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.changes-file { display: flex; gap: 8px; align-items: center; width: 100%; text-align: left; background: transparent; border: 0; color: inherit; padding: 4px 6px; border-radius: 6px; cursor: pointer; font-size: 12px; font-family: var(--mono, monospace); }
+.changes-file:hover { background: var(--hover, #22262e); }
+.changes-status { font-weight: 700; width: 14px; text-align: center; }
+.changes-status.st-A { color: var(--ok, #57ab5a); }
+.changes-status.st-M { color: var(--warn, #c69026); }
+.changes-status.st-D { color: var(--danger, #e5534b); }
+.changes-diff { border: 1px solid var(--border, #2a2f38); border-radius: 8px; margin: 2px 0 8px; padding: 6px; max-height: 320px; overflow: auto; }

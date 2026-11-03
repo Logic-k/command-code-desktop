@@ -6,6 +6,8 @@
 // died and was replaced still has holders, and their releases must land on
 // the connection they actually hold.
 
+import { backendById } from "../backends";
+import { isWindows } from "../ui/platform";
 import { AcpConnection } from "./client";
 
 /** How long an unused connection lingers, so reopening a chat is instant. */
@@ -22,8 +24,8 @@ interface Entry {
 const current = new Map<string, Entry>();
 /** Every connection someone still holds, current or replaced. */
 const held = new Map<AcpConnection, Entry>();
-function keyFor(cwd: string, accountId: string | null): string {
-	return `${accountId ?? ""}|${cwd.replace(/[\\/]+$/, "").toLowerCase()}`;
+function keyFor(cwd: string, accountId: string | null, backendId?: string): string {
+	return `${backendId ?? ""}|${accountId ?? ""}|${cwd.replace(/[\\/]+$/, "").toLowerCase()}`;
 }
 
 function clearIdle(entry: Entry): void {
@@ -39,11 +41,12 @@ function retire(entry: Entry): void {
 }
 
 /** Take a reference; pair every call with `release`. */
-export function acquire(cwd: string, accountId: string | null): AcpConnection {
-	const key = keyFor(cwd, accountId);
+export function acquire(cwd: string, accountId: string | null, backendId?: string): AcpConnection {
+	const key = keyFor(cwd, accountId, backendId);
 	let entry = current.get(key);
 	if (!entry || entry.connection.dead) {
-		const connection = new AcpConnection(cwd, accountId);
+		const backend = backendById(backendId, isWindows);
+		const connection = new AcpConnection(cwd, accountId, backendId, backend.spec ?? null);
 		const fresh: Entry = { key, connection, refs: 0, idleTimer: null };
 		connection.onExit(() => {
 			if (fresh.refs === 0) retire(fresh);
@@ -82,8 +85,9 @@ export async function withConnection<T>(
 	cwd: string,
 	accountId: string | null,
 	run: (connection: AcpConnection) => Promise<T>,
+	backendId?: string,
 ): Promise<T> {
-	const connection = acquire(cwd, accountId);
+	const connection = acquire(cwd, accountId, backendId);
 	try {
 		await connection.start();
 		return await run(connection);
@@ -97,7 +101,7 @@ export async function withConnection<T>(
 export function restart(connection: AcpConnection): AcpConnection {
 	if (!connection.dead) return connection;
 	release(connection);
-	return acquire(connection.cwd, connection.accountId);
+	return acquire(connection.cwd, connection.accountId, connection.backendId);
 }
 
 /** Retire idle agents of an account (after it was removed or re-logged in). */

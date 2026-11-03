@@ -39,6 +39,7 @@ import {
 import { basename, byId, h, relativeTime, svg } from "./ui/dom";
 import { icons } from "./ui/icons";
 import { isMac, keys, modHeld } from "./ui/platform";
+import { backendSettingsBlock } from "./ui/settings-backends";
 import { ChatView, describeError } from "./views/chat";
 import { Channel } from "@tauri-apps/api/core";
 import { TerminalView } from "./views/terminal";
@@ -71,7 +72,7 @@ let settings: Settings = loadSettings();
 let projects: Project[] = [];
 let activeProject: string | null = null;
 const expanded = new Set<string>();
-const sessionCache = new Map<string, { at: number; sessions: SessionInfo[] | Error }>();
+const sessionCache = new Map<string, { at: number; sessions: SessionInfo[] | Error; deletable?: boolean }>();
 const tabs: Tab[] = [];
 let activeTab: Tab | null = null;
 let tabSeq = 0;
@@ -206,6 +207,21 @@ function renderSessions(cwd: string): HTMLElement {
 				},
 				h("span", { class: "session-title" }, session.title || "제목 없는 대화"),
 				h("span", { class: "session-time" }, relativeTime(session.updatedAt)),
+				cached?.deletable
+					? h("button", {
+						class: "session-del", type: "button", title: "세션 기록 삭제",
+						onclick: async (event: Event) => {
+							event.stopPropagation();
+							if (!(await ask(`'${session.title || "제목 없는 대화"}' 기록을 삭제합니다. 되돌릴 수 없습니다.`, { kind: "warning", title: "세션 삭제" }))) return;
+							try {
+								await pool.withConnection(cwd, activeAccountId(), (c) => c.deleteSession(session.sessionId));
+								void loadSessions(cwd, true);
+							} catch (error) {
+								window.alert(`삭제 실패: ${error instanceof Error ? error.message : String(error)}`);
+							}
+						},
+					}, "×")
+					: null,
 			),
 		);
 	}
@@ -227,9 +243,13 @@ async function loadSessions(cwd: string, force = false): Promise<void> {
 		renderProjects();
 	}
 	try {
-		const sessions = await pool.withConnection(cwd, activeAccountId(), (c) => c.listSessions());
+		let deletable = false;
+		const sessions = await pool.withConnection(cwd, activeAccountId(), (c) => {
+			deletable = c.canDelete;
+			return c.listSessions();
+		});
 		sessions.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
-		sessionCache.set(key, { at: Date.now(), sessions });
+		sessionCache.set(key, { at: Date.now(), sessions, deletable });
 	} catch (error) {
 		sessionCache.set(key, { at: Date.now(), sessions: error instanceof Error ? error : new Error(String(error)) });
 	}
@@ -1560,12 +1580,42 @@ function openUpdates(): void {
 	});
 	compatBtn.addEventListener("click", () => void runCompat());
 
+	const upStatus = h("div", { class: "update-status" },
+		h("div", { class: "muted small" }, "GitHub Releases에 올라온 서명된 업데이트를 확인합니다. 소스 빌드와는 별개 채널입니다."));
+	const upBtn = h("button", { class: "btn", type: "button" }, "배포본 업데이트 확인");
+	upBtn.addEventListener("click", async () => {
+		upBtn.disabled = true;
+		upStatus.textContent = "확인 중…";
+		try {
+			const { check } = await import("@tauri-apps/plugin-updater");
+			const update = await check({ timeout: 30_000 });
+			if (!update) {
+				upStatus.textContent = "최신 버전입니다.";
+			} else {
+				upStatus.replaceChildren(
+					h("div", { class: "update-new" }, `새 버전 ${update.version}`),
+					h("div", { class: "muted small" }, "내려받고 서명을 확인하는 중…"),
+				);
+				await update.downloadAndInstall();
+				upStatus.replaceChildren(
+					h("div", { class: "update-new" }, "설치 준비 완료 — 앱을 다시 시작하면 적용됩니다."),
+					h("div", { class: "row" },
+						h("button", { class: "btn primary", type: "button", onclick: () => void appWindow.close() }, "지금 종료해서 적용")),
+				);
+			}
+		} catch (error) {
+			upStatus.textContent = `업데이트 확인 실패: ${describeError(error)}`;
+		}
+		upBtn.disabled = false;
+	});
+
 	settingsEl.replaceChildren(
 		h(
 			"div",
 			{ class: "settings" },
 			h("h2", null, "업데이트 · 호환성"),
 			h("section", { class: "update-block" }, h("h3", null, "앱"), appStatus, h("div", { class: "row" }, appBtn)),
+			h("section", { class: "update-block" }, h("h3", null, "배포본 (설치 파일)"), upStatus, h("div", { class: "row" }, upBtn)),
 			log,
 			h(
 				"section",
@@ -1823,6 +1873,8 @@ function openSettings(): void {
 		settingsEl.close();
 	};
 
+	const backendsBlock = backendSettingsBlock();
+
 	settingsEl.replaceChildren(
 		h(
 			"form",
@@ -1835,6 +1887,7 @@ function openSettings(): void {
 			h("label", { class: "check" }, thoughtsBox, "에이전트의 생각 과정을 펼쳐서 보기"),
 			h("label", { class: "check" }, mathBox, "입력창에 쓴 LaTeX 수식을 입력창 위에 미리 보기"),
 			field("터미널 글자 크기", fontSize),
+			backendsBlock,
 			h(
 				"button",
 				{ class: "btn", type: "button", onclick: () => void openUpdates() },

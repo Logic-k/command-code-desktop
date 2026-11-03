@@ -1,6 +1,7 @@
 // Windows and macOS name and press the main shortcut modifier differently.
 
 export const isMac = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent);
+export const isWindows = /Win/i.test(navigator.platform || navigator.userAgent);
 
 /** The shortcut modifier as shown to people: "⌘" on macOS, "Ctrl+" elsewhere. */
 export const mod = isMac ? "⌘" : "Ctrl+";

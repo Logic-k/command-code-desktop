@@ -7,6 +7,7 @@ pub mod procs;
 pub mod pty;
 pub mod setup;
 pub mod updates;
+pub mod worktree;
 
 use acp::AcpManager;
 use pty::PtyManager;
@@ -49,6 +50,7 @@ pub fn run() {
             updates::start_version_watch(app.handle());
             Ok(())
         })
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             accounts::account_list,
             accounts::account_login_begin,
@@ -79,6 +81,10 @@ pub fn run() {
             acp::acp_spawn,
             acp::acp_send,
             acp::acp_kill,
+            worktree::worktree_create,
+            worktree::worktree_changes,
+            worktree::worktree_file_diff,
+            worktree::worktree_remove,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

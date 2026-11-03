@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { campaignSlug, createWorkflow, learningCandidates, RESEARCH_TYPES, WORKFLOWS, workflowKind, type ResearchBrief, type WorkflowKind, type WorkflowRun } from "../workflow";
 import { renderUlwCanvas, type UlwRun } from "./dag";
+import { renderDiff } from "./diff";
 import { h } from "./dom";
 
 export const DESKTOP_COMMANDS = [
@@ -43,6 +44,9 @@ export class ExecutionPanel {
 	private readonly results = h("div", { class: "execution-results" });
 	private readonly learning = h("div", { class: "execution-learning" });
 	private readonly observed = h("details", null, h("summary", null, "CLI ULW 실행 그래프 (관찰)"));
+	private readonly isolateBox = h("input", { type: "checkbox", checked: true });
+	private readonly isolateLabel: HTMLElement;
+	private readonly changes = h("div", { class: "execution-changes" });
 	private readonly start: HTMLButtonElement;
 	private readonly stop: HTMLButtonElement;
 	private readonly exportButton: HTMLButtonElement;
@@ -92,8 +96,10 @@ export class ExecutionPanel {
 				h("p", null, "저장한 취향을 각 역할에 전달합니다. 모델 학습이 아닙니다. 기존 taste 파일은 변경하지 않습니다."),
 				this.taste, save),
 			h("p", { class: "execution-description" }, "현재 Command Code 계정·선택 모델을 사용합니다. 역할마다 추론이 발생합니다. 조사 역할은 묻지 않기 모드(없으면 계획 모드), 구현은 시작할 때의 권한 모드, 코딩 검증은 표준 모드(권한 무시 중이면 그대로)로 실행하며 읽기 전용 역할의 변경 요청은 거부하고 변경 도구를 실행한 역할은 실패 처리합니다. 역할의 질문에는 앱이 바로 답합니다(계획 모드 전환은 거절, 나머지는 추천 답, 없으면 첫 답). 검증은 그 세션에서 실제로 완료된 도구 호출 기록이 있어야 통과합니다. 앱 종료 후 자동 재개되지 않습니다."),
+			this.isolateLabel = h("label", { class: "execution-check hidden" }, this.isolateBox,
+				" 격리 실행 — git worktree에서 실행하고, 바뀐 파일을 아래에 따로 보여 줍니다"),
 			h("div", { class: "execution-controls" }, this.start, this.stop, this.exportButton),
-			this.status, this.saved, this.graphLabel, this.graph, this.results, this.learning, this.observed,
+			this.status, this.saved, this.graphLabel, this.graph, this.results, this.changes, this.learning, this.observed,
 		);
 		this.describe();
 	}
@@ -111,6 +117,7 @@ export class ExecutionPanel {
 		const item = WORKFLOWS.find((entry) => entry.id === kind);
 		this.description.textContent = item?.description ?? "";
 		this.brief.hidden = kind === "taste";
+		this.isolateLabel.classList.toggle("hidden", kind !== "build" && kind !== "taste");
 		if (kind && !this.run) {
 			let preview: WorkflowRun;
 			try {
@@ -144,6 +151,7 @@ export class ExecutionPanel {
 		if (!kind || this.active) return;
 		try {
 			this.run = createWorkflow(kind, this.objective.value, this.taste.value, this.iterations.valueAsNumber, this.buildBrief(this.objective.value));
+			this.run.isolate = this.isolateBox.checked && (kind === "build" || kind === "taste");
 			this.selected = null;
 			this.saved.textContent = "";
 			this.host.start(this.run);
@@ -168,6 +176,40 @@ export class ExecutionPanel {
 
 	showSaveError(message: string): void {
 		this.saved.textContent = message;
+	}
+
+	/** Files an isolated run left in its worktree; each opens a diff inline. */
+	showChanges(worktree: { path: string; root: string; branch: string }, info: { branch: string; files: { path: string; status: string; added?: number | null; deleted?: number | null }[] }): void {
+		const remove = h("button", {
+			class: "btn ghost", type: "button",
+			onclick: () => void invoke("worktree_remove", { root: worktree.root, path: worktree.path })
+				.then(() => this.changes.replaceChildren())
+				.catch((error) => { this.saved.textContent = `worktree 정리 실패: ${String(error)}`; }),
+		}, "worktree 정리");
+		this.changes.replaceChildren(h("h3", null, `격리 실행 변경 — ${info.branch} · ${worktree.path}`),
+			info.files.length
+				? h("ul", { class: "changes-list" }, info.files.map((file) => {
+					const body = h("div", { class: "changes-diff hidden" });
+					const row = h("button", {
+						class: "changes-file", type: "button",
+						onclick: () => {
+							if (!body.classList.contains("hidden")) return body.classList.add("hidden");
+							body.classList.remove("hidden");
+							if (!body.hasChildNodes()) {
+								void invoke<[string | null, string]>("worktree_file_diff", { path: worktree.path, file: file.path })
+									.then(([oldText, newText]) => body.replaceChildren(renderDiff(oldText, newText)))
+									.catch((error) => { body.textContent = `차이를 읽지 못했습니다: ${String(error)}`; });
+							}
+						},
+					}, h("span", { class: `changes-status st-${file.status}` }, file.status), file.path,
+						h("span", { class: "tool-stats" },
+							file.added != null ? h("span", { class: "add" }, `+${file.added}`) : null,
+							file.deleted != null ? h("span", { class: "del" }, `−${file.deleted}`) : null));
+					return h("li", null, row, body);
+				}))
+				: h("p", null, "바뀐 파일이 없습니다."),
+			h("div", { class: "execution-controls" }, remove));
+		this.changes.scrollIntoView({ block: "nearest" });
 	}
 
 	update(run: WorkflowRun): void {

@@ -1,6 +1,6 @@
 [package]
 name = "cmdc-gui"
-version = "0.5.0"
+version = "0.6.0"
 description = "Desktop GUI shell for the Command Code CLI"
 authors = ["you"]
 edition = "2024"
@@ -32,6 +32,7 @@ tauri-plugin-single-instance = "2"
 keyring = { version = "3", features = ["windows-native", "apple-native"] }
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 sha2 = "0.10"
+tauri-plugin-updater = "2.14.1"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

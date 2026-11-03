@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Command Code Desktop — P0~P4 구현 결과 보고서</title>
+<style>
+:root{color-scheme:light dark;--ink:var(--foreground,CanvasText);--paper:var(--background,Canvas);--dim:var(--muted-foreground,GrayText);--line:var(--border,color-mix(in srgb,CanvasText 20%,Canvas));--panel:var(--card,color-mix(in srgb,CanvasText 4%,Canvas));--accent:var(--primary,LinkText);--ok:#3fb950;--warn:#c69026;--bad:#e5534b}
+*{box-sizing:border-box}body{margin:0 auto;max-width:1080px;padding:2rem 1.2rem;background:var(--paper);color:var(--ink);font-family:var(--font-sans,system-ui,sans-serif);line-height:1.7;word-break:keep-all;overflow-wrap:anywhere}
+header{border-bottom:1px solid var(--line);padding-bottom:1rem;margin-bottom:1.5rem}h1{font-size:1.75rem;line-height:1.35;margin:.4rem 0 1rem;letter-spacing:-.03em}h2{font-size:1.22rem;margin:1.8rem 0 .7rem;padding-top:.4rem;border-top:1px solid var(--line)}h3{font-size:1rem;margin:1rem 0 .4rem}p{margin:.55rem 0}.eyebrow,.muted{color:var(--dim)}.eyebrow{font-size:.82rem;letter-spacing:.04em}.lead{font-size:1.08rem}.note{border-left:3px solid var(--accent);padding:.55rem 1rem;background:var(--panel);margin:.8rem 0}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.9rem}.cell{border:1px solid var(--line);border-radius:10px;padding:.9rem 1rem;min-width:0;background:var(--panel)}.cell h3{margin-top:0}
+table{border-collapse:collapse;width:100%;text-align:left;font-size:.9rem;margin:.6rem 0}th,td{vertical-align:top;padding:.5rem .6rem;border-bottom:1px solid var(--line)}th{font-weight:650}
+code,pre{font-family:var(--font-mono,ui-monospace,monospace);font-size:.86em}code{background:var(--panel);border-radius:4px;padding:.08em .3em}pre{padding:.8rem;background:var(--panel);border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere}
+a{color:var(--accent);text-underline-offset:.2em}.tag{display:inline-block;font-size:.72rem;font-weight:700;border-radius:99px;padding:.08em .6em;margin-right:.4em;vertical-align:.1em}
+.tag-done{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}.tag-part{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}.tag-block{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}
+ul{padding-left:1.3rem}li{margin:.3rem 0}footer{border-top:1px solid var(--line);margin-top:2rem;padding-top:1rem;font-size:.84rem;color:var(--dim)}
+@media(max-width:640px){.grid{grid-template-columns:1fr}h1{font-size:1.45rem}}
+</style>
+</head>
+<body><article>
+<header>
+<p class="eyebrow">COMMAND CODE DESKTOP · 구현 결과 보고서 · 2026-11-03</p>
+<h1>P0~P4 전 항목 구현 완료 — ACP v2, 다중 에이전트, 격리 실행, 서명 업데이트</h1>
+<p class="lead">3라운드 리서치 보고서(<code>docs/research/development-directions-2026-11-03.md</code>)의 제안 우선순위를 전부 처리했습니다. 빌드와 오프라인 QA·Rust 테스트는 통과했고, 실제 CLI/모델이 필요한 구간은 미검증으로 표시했습니다.</p>
+<p class="note"><strong>검증 범위:</strong> 이 컴퓨터에 Command Code CLI가 설치되어 있지 않아 실제 에이전트와의 라이브 프로토콜 실행은 확인하지 못했습니다. 아래 "미확인 항목"이 남아 있습니다.</p>
+</header>
+
+<section>
+<h2>한눈에 보는 결과</h2>
+<div class="grid">
+<div class="cell"><h3><span class="tag tag-done">P0</span>ACP v2 업그레이드</h3><p>프로토콜 버전 2 제안 + v1 폴백. <code>session/resume</code>·<code>session/delete</code>·<code>plan_update</code>·<code>state_update</code>·에이전트 터미널·<code>elicitation/create</code>·<code>$/cancel_request</code>·<code>auth/login</code> 구현. QA 스크립트 35항목 통과.</p></div>
+<div class="cell"><h3><span class="tag tag-done">P1</span>리서치 해자</h3><p><code>.research/</code> 캠페인·브리프·주장 장부는 직전 커밋(<code>a28f93e</code>)에 이미 구현·테스트되어 있음을 확인하고, 격리 실행으로 보강했습니다.</p></div>
+<div class="cell"><h3><span class="tag tag-done">P2</span>범용 ACP 백엔드</h3><p><code>acp_spawn</code>이 커스텀 에이전트를 받습니다. 설정에서 임의 ACP 명령 등록 + "Codex (ChatGPT 구독)" 프리셋(<code>@agentclientprotocol/codex-acp</code>). 탭 상단 백엔드 선택으로 전환.</p></div>
+<div class="cell"><h3><span class="tag tag-done">P3</span>격리 실행 + Changes 뷰</h3><p>빌드/Taste 워크플로가 git worktree에서 실행됩니다(기본 켜짐). 종료 후 변경 파일 목록·diff·worktree 정리 버튼을 실행 탭에 표시합니다.</p></div>
+<div class="cell"><h3><span class="tag tag-done">P4</span>배포 파이프라인</h3><p>PR #1(Windows NSIS CI) 병합 완료(<code>32ee9ae</code>). tauri-plugin-updater 설정 + minisign 키 생성 + 배포본 업데이트 확인 UI + <code>docs/DISTRIBUTION.md</code>.</p></div>
+<div class="cell"><h3><span class="tag tag-done">부분 완료</span>라이브 검증 게이트</h3><p>실 에이전트 프로브로 cmd(v1 협상, list/resume/close)·codex-acp(v2, ChatGPT authMethods) 핸드셰이크를 실측했고, 그 과정에서 initialize 스키마·cancel 필드명·configId 등 <strong>상호운용 버그 3건을 수정</strong>했습니다. 로그인 완주·업데이트 다운로드는 잔여.</p></div>
+</div>
+</section>
+
+<section>
+<h2>화면 미리보기 — 실제 컴포넌트 렌더링</h2>
+<p class="muted">오프라인 프리뷰 하네스(<code>scripts/qa/preview.ts</code>)가 진짜 <code>ChatView</code>·<code>ExecutionPanel</code>·설정 블록을 띄우고, 모의 ACP 피어가 v2 이벤트를 흘려보낸 결과입니다. 라이브 에이전트가 아닌 오프라인 렌더 검증이며, 실제 에이전트와의 동작은 별도 게이트입니다.</p>
+<figure>
+<img src="shots/chat.png" alt="ACP v2 채팅 화면" style="width:100%;border:1px solid var(--line);border-radius:8px">
+<figcaption class="muted">P0 — 헤더의 <strong>백엔드 드롭다운(Command Code ▼)</strong>, <strong>elicitation 폼 카드</strong>(enum 셀렉트·숫자·체크박스·텍스트 필드), 하단 <strong>할 일 패널(plan_update)</strong>, 상태줄의 <code>state_update: requires_action</code> 표시.</figcaption>
+</figure>
+<figure>
+<img src="shots/elicit-url.png" alt="elicitation URL 카드" style="width:100%;border:1px solid var(--line);border-radius:8px">
+<figcaption class="muted">P0 — elicitation <strong>URL 모드</strong>: 인증 주소를 열기 전에 호스트를 보여 주고 사용자 동의를 받습니다. 무인 워크플로 역할은 이 카드 없이 자동 decline됩니다.</figcaption>
+</figure>
+<figure>
+<img src="shots/changes.png" alt="격리 실행 변경 뷰" style="width:100%;border:1px solid var(--line);border-radius:8px">
+<figcaption class="muted">P3 — 실행 탭 하단의 <strong>격리 실행 변경</strong>: worktree 브랜치·경로, A/M/D 상태와 줄 수, 파일 클릭 시 인라인 diff, "worktree 정리" 버튼.</figcaption>
+</figure>
+<figure>
+<img src="shots/settings.png" alt="설정의 에이전트 백엔드 블록" style="width:100%;border:1px solid var(--line);border-radius:8px">
+<figcaption class="muted">P2 — 설정의 <strong>에이전트 백엔드(ACP)</strong> 블록: 등록된 커스텀 에이전트(Codex ChatGPT), 명령 추가 폼, codex-acp 프리셋 버튼.</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>리서치 요약 (선행 조사 결과)</h2>
+<ul>
+<li><strong>ACP v2 스펙 확정</strong>: 세션 <code>list/resume/delete</code>, <code>plan_update</code>(todos mod 없이 Plan 패널 가능), <code>state_update</code>, 에이전트 소유 터미널, <code>elicitation</code>(form/url), <code>$/cancel_request</code>, <code>auth/*</code>. CLI 최신 1.88.2.</li>
+<li><strong>WP-03 재정의</strong>: 자체 Codex 어댑터 대신 공식 <code>codex-acp</code> + 범용 백엔드로 해결 — ChatGPT 구독 인증이 어댑터에 내장.</li>
+<li><strong>차별화</strong>: 일반 채팅 GUI는 이미 상품화(ACP 클라이언트 100+). 해자는 유형화 리서치 + 주장 장부 + 검증 영수증 + 무인 역할 — 공식 데스크톱도 dont-ask를 지원하지 않음.</li>
+</ul>
+</section>
+
+<section>
+<h2>P0 — ACP v2 상세</h2>
+<table>
+<tr><th>항목</th><th>구현</th><th>위치</th></tr>
+<tr><td>버전 협상</td><td><code>PROTOCOL_VERSION = 2</code> 제안, 에이전트 응답 버전 사용. v1 업데이트 이름도 계속 수신.</td><td><code>src/acp/client.ts</code></td></tr>
+<tr><td>세션 수명주기</td><td><code>session/resume</code>(canResume 시, 아니면 load), <code>session/delete</code>(canDelete 시 사이드바 × 버튼 + 확인), <code>session/list</code> 기존 유지.</td><td><code>client.ts</code>, <code>chat.ts</code>, <code>main.ts</code></td></tr>
+<tr><td>업데이트 종류</td><td><code>plan_update</code>·<code>state_update</code>(requires_action 표시)·<code>user/agent_message</code>(messageId)·<code>agent_thought</code>·<code>tool_call_content_chunk</code> 추가. 리플레이 중복 억제에도 반영.</td><td><code>types.ts</code>, <code>chat.ts</code></td></tr>
+<tr><td>에이전트 터미널</td><td><code>terminal_update</code>/<code>terminal_output_chunk</code>를 읽기 전용 execute 카드(<code>terminal:&lt;id&gt;</code>)로 표시.</td><td><code>chat.ts</code> <code>upsertTerminal</code></td></tr>
+<tr><td>Elicitation</td><td><code>elicitation/create</code> 서빙: 폼(string/enum/number/boolean/array) → 카드 UI, url 모드 → 동의 후 시스템 브라우저. 무인 워크플로 역할은 <code>decline</code> 자동 응답.</td><td><code>client.ts</code>, <code>chat.ts</code> <code>onElicitation</code></td></tr>
+<tr><td>취소</td><td>타임아웃·<code>session/cancel</code>마다 <code>$/cancel_request</code> 발송. 모든 취소 경로가 <code>cancelSession()</code> 사용.</td><td><code>client.ts</code>, <code>chat.ts</code></td></tr>
+<tr><td>인증</td><td><code>authMethods</code> 노출, <code>auth/login</code> 헬퍼.</td><td><code>client.ts</code></td></tr>
+</table>
+</section>
+
+<section>
+<h2>P2 — 범용 백엔드 상세</h2>
+<ul>
+<li><code>src/backends.ts</code> 신규: 백엔드 레지스트리(builtin Command Code + 사용자 정의), <code>parseCommandLine</code>, codex 프리셋(Windows는 <code>cmd.exe /c npx …</code>로 shim 해결).</li>
+<li><code>acp_spawn</code>에 <code>agent: Option&lt;AgentSpec&gt;</code> 추가 — 커스텀 에이전트는 사용자 환경을 상속(npx/uvx가 풀림), Command Code env는 주지 않음.</li>
+<li>프로세스 풀 키가 <code>backend|account|cwd</code>로 확장, <code>restart</code>가 backendId를 유지.</li>
+<li>설정 → 에이전트 백엔드: 추가/삭제 UI + codex 프리셋 버튼. 탭 헤더의 백엔드 드롭다운(커스텀 등록 시에만 표시)으로 전환 — 세션은 이식되지 않으므로 새 대화 시작.</li>
+<li>레시피 문서: <code>docs/BACKENDS.md</code>.</li>
+</ul>
+</section>
+
+<section>
+<h2>P3 — 격리 실행 상세</h2>
+<ul>
+<li><code>src-tauri/src/worktree.rs</code> 신규: <code>worktree_create</code>(앱 데이터 폴더에 <code>ccd-&lt;slug&gt;&lt;ts&gt;</code> 브랜치 체크아웃), <code>worktree_changes</code>(porcelain + numstat), <code>worktree_file_diff</code>(HEAD 대비 텍스트 쌍), <code>worktree_remove</code>.</li>
+<li>실행 탭에 "격리 실행" 체크박스(빌드/Taste만 표시, 기본 켜짐). 역할 세션의 cwd가 worktree 경로로 바뀌어 원본 작업본을 건드리지 않음.</li>
+<li>실행 종료 후 변경 파일 목록(A/M/D + 줄 수), 파일별 인라인 diff, "worktree 정리" 버튼. <strong>자동 merge는 하지 않습니다</strong> — 브랜치를 리뷰 후 수동 반영.</li>
+<li>git 저장소가 아닌 프로젝트에서는 체크박스를 끄면 기존 동작 유지.</li>
+</ul>
+</section>
+
+<section>
+<h2>P4 — 배포 상세</h2>
+<ul>
+<li><strong>PR #1 병합</strong>: Windows NSIS CI(두 잡 모두 workflow_dispatch 통과 확인 후 merge) → origin/main <code>32ee9ae</code>, 로컬 fast-forward.</li>
+<li><code>@tauri-apps/plugin-updater</code> 2.14.1(JS+Rust) 추가, lib.rs 플러그인 등록, capability <code>updater:default</code>.</li>
+<li><code>tauri.conf.json</code>: <code>createUpdaterArtifacts</code> + endpoints(<code>releases/latest/download/latest.json</code>) + minisign 공개키 + Windows passive 설치 모드.</li>
+<li>키: 개인키 <code>~/.tauri/cmdc-gui.key</code>(저장소 밖, 비밀) — 분실 시 업데이트 체인 단절.</li>
+<li>업데이트 창에 "배포본 (설치 파일)" 블록: <code>check()</code> → <code>downloadAndInstall()</code> → 종료 시 적용.</li>
+<li><code>docs/DISTRIBUTION.md</code>: 릴리스 절차, latest.json 스키마, SmartScreen/공증 단계(Azure Trusted Signing 등) 정리.</li>
+</ul>
+</section>
+
+<section>
+<h2>검증 결과</h2>
+<table>
+<tr><th>검사</th><th>결과</th></tr>
+<tr><td><code>pnpm build</code> (tsc + vite)</td><td><span class="tag tag-done">통과</span></td></tr>
+<tr><td><code>bun scripts/qa/workflow.mjs</code> (research/team/build/taste, 재시도, malformed 판정, 취소)</td><td><span class="tag tag-done">"passed": true</span></td></tr>
+<tr><td><code>bun scripts/qa/acp-v2.mjs</code> (신규: 프로토콜 계약·백엔드·worktree·updater 정적 단언 35항목)</td><td><span class="tag tag-done">"passed": true</span></td></tr>
+<tr><td><code>cargo check</code> / <code>cargo test --lib</code></td><td><span class="tag tag-done">8/8 통과</span></td></tr>
+<tr><td>GitHub: PR #1 병합, 로컬 fast-forward</td><td><span class="tag tag-done">32ee9ae</span></td></tr>
+</table>
+</section>
+
+<section>
+<h2>라이브 검증 결과 (2차 — 실 에이전트 프로브)</h2>
+<p>이 보고서 작성 후 <code>scripts/qa/live-init.mjs</code> 프로브로 두 에이전트를 실제로 스폰해 핸드셰이크를 검증했고, 그 과정에서 <strong>실제 상호운용 버그 3건을 발견·수정</strong>했습니다.</p>
+<table>
+<tr><th>검증</th><th>결과</th><th>발견·조치</th></tr>
+<tr><td><code>command-code@1.88.2 acp</code> initialize</td><td><span class="tag tag-done">실측</span></td><td>v2 제안에 <strong>v1으로 다운 협상</strong>. <code>sessionCapabilities: list/resume/close</code> 실제 지원, <code>delete</code> 없음 → capability 게이트가 정확히 작동함을 확인</td></tr>
+<tr><td><code>session/list</code> · <code>session/resume</code></td><td><span class="tag tag-done">실측</span></td><td>실 CLI에서 기존 세션 조회·재개 성공, <code>available_commands_update</code> 수신 확인</td></tr>
+<tr><td><code>codex-acp@2.5.0</code> initialize + <code>session/new</code></td><td><span class="tag tag-done">실측</span></td><td><strong>v2 응답</strong>. <code>authMethods</code>: api-key / <strong>chat-gpt</strong> / chat-gpt-device-code — ChatGPT 구독 인증 경로 실존 확인. <code>session.delete</code>·<code>fork</code>·<code>additionalDirectories</code> 지원</td></tr>
+<tr><td>v2 initialize 스키마</td><td><span class="tag tag-done">수정</span></td><td>v2는 <code>capabilities</code>/<code>info</code> 필드명(v1은 <code>clientCapabilities</code>/<code>clientInfo</code>). codex-acp가 v1 형태를 -32602로 거부 → 클라이언트가 두 형태를 동시 전송 + v1 재시도 폴백, 응답도 v2→v1 정규화</td></tr>
+<tr><td><code>$/cancel_request</code> 필드명</td><td><span class="tag tag-done">수정</span></td><td>스펙 확인 결과 <code>requestId</code>(<code>id</code>가 아님) — 잘못 보내던 것 수정</td></tr>
+<tr><td>v2 <code>configId</code> / <code>methodId</code> 필드명</td><td><span class="tag tag-done">수정</span></td><td>configOptions의 <code>configId</code>, authMethods의 <code>methodId</code>를 v1 이름으로 정규화 — 미적용 시 codex 세션의 모델/모드 선택 UI가 깨졌을 것</td></tr>
+<tr><td>elicitation 페이로드 형태</td><td><span class="tag tag-done">스펙 대조</span></td><td><code>{action: accept|decline|cancel, content?}</code> 응답, form/url 모드, requestedSchema 형태 모두 일치 확인(구현 정확). 실 에이전트 수신만 잔여</td></tr>
+<tr><td><code>@agentclientprotocol/acp-tck</code></td><td><span class="tag tag-done">확인</span></td><td>npm에 미공개(E404) — 정적 계약 QA(<code>acp-v2.mjs</code>)가 현재 최선, 유지</td></tr>
+<tr><td>Windows <code>npx command-code</code></td><td><span class="tag tag-done">발견</span></td><td>패키지 <code>cmd</code> 바이너리가 cmd.exe와 충돌 → <code>commandcode</code>/<code>cmdc</code> 별칭 필요, BACKENDS.md에 문서화</td></tr>
+</table>
+<p class="muted">프롬프트 왕복은 실계정 토큰 소모가 있어 수행하지 않았습니다. codex-acp가 에이전트→클라이언트 요청에 "Invalid message"를 stderr로 기록한 1건은 실패 없이 핸드셰이크·세션 생성 모두 성공해 잔여 관찰로 남깁니다.</p>
+</section>
+
+<section>
+<h2>미확인 · 남은 과제</h2>
+<table>
+<tr><th>항목</th><th>상태</th><th>확인 방법</th></tr>
+<tr><td>elicitation 실제 발화(에이전트가 보내는 순간)</td><td><span class="tag tag-part">잔여</span></td><td>스펙·페이로드는 검증 완료 — codex-acp 로그인 흐름에서 URL 모드가 실제로 올 때 카드 렌더 확인 필요</td></tr>
+<tr><td>codex-acp ChatGPT 로그인 완주</td><td><span class="tag tag-part">잔여</span></td><td>핸드셰이크·authMethods는 실측 완료 — <code>auth/login</code>→URL 동의→로그인→프롬프트 왕복은 계정 액션 필요</td></tr>
+<tr><td>cmd 프롬프트 왕복(토큰·전사 저장)</td><td><span class="tag tag-part">잔여</span></td><td>실계정 추론 비용 — 사용자 승인 시 소량 테스트 가능</td></tr>
+<tr><td>설치본 자동 업데이트 E2E</td><td><span class="tag tag-part">부분</span></td><td>서명 빌드(.sig 생성)는 로컬 검증 — <code>latest.json</code>을 릴리스에 올려야 다운로드 경로 확인 가능(DISTRIBUTION.md 절차대로)</td></tr>
+<tr><td>Windows NSIS 서명(SmartScreen)</td><td><span class="tag tag-block">차단</span></td><td>코드 사이닝 인증서(Azure Trusted Signing 등) 구매 필요 — 현재는 minisign 업데이트 서명만</td></tr>
+<tr><td>다중 계정 약관 / billing.ts <code>/alpha/</code> API 권한</td><td><span class="tag tag-block">보류</span></td><td>정책 확인 전까지 기존 문서화된 위험으로 유지</td></tr>
+</table>
+<p class="note">기존 계획의 다음 항목: 라이브 모델 품질 검증, macOS에서 네이티브 QA, 설치본 QA — 모두 실 환경 게이트로 기존 규칙에 따라 "통과 선언"하지 않습니다.</p>
+</section>
+
+<section>
+<h2>변경된 파일</h2>
+<ul>
+<li><code>src/acp/types.ts</code>, <code>src/acp/client.ts</code>, <code>src/acp/pool.ts</code> — v2 프로토콜·elicitation·백엔드 키</li>
+<li><code>src/backends.ts</code> (신규), <code>docs/BACKENDS.md</code> (신규)</li>
+<li><code>src/views/chat.ts</code> — v2 업데이트 처리, elicitation 카드, 백엔드 전환, 격리 실행 훅</li>
+<li><code>src/ui/execution.ts</code>, <code>src/ui/platform.ts</code>, <code>src/styles.css</code> — 격리 체크박스·Changes 뷰·elicitation/백엔드 스타일</li>
+<li><code>src/main.ts</code> — 세션 삭제, 백엔드 설정, 배포본 업데이트 블록</li>
+<li><code>src-tauri/src/acp.rs</code>, <code>src-tauri/src/worktree.rs</code> (신규), <code>src-tauri/src/lib.rs</code>, <code>Cargo.toml</code>, <code>tauri.conf.json</code>, <code>capabilities/default.json</code>, <code>package.json</code></li>
+<li><code>scripts/qa/acp-v2.mjs</code> (신규), <code>docs/DISTRIBUTION.md</code> (신규), <code>README.md</code></li>
+</ul>
+</section>
+
+<footer>
+<p>Command Code Desktop · P0~P4 구현 보고 · 2026-11-03. 선행 리서치: <code>docs/research/development-directions-2026-11-03.md</code>. 오프라인 검증만으로 "라이브 동작"을 주장하지 않습니다.</p>
+</footer>
+</article></body>
+</html>

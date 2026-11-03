@@ -27,6 +27,11 @@ export interface WorkflowRun extends UlwRun {
 	verification: string;
 	/** Structured research input; null for taste runs and one-line objectives. */
 	readonly brief: ResearchBrief | null;
+	/** Run build/taste roles in a scratch git worktree, not the user's copy. */
+	isolate?: boolean;
+	/** Set by the host when isolation is on: role sessions use it as cwd. */
+	workdir?: string;
+	worktree?: { path: string; root: string; branch: string } | null;
 }
 
 export type ResearchTypeId = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12";
